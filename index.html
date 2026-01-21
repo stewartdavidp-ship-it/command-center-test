@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Game Shelf Command Center</title>
-    <meta name="version" content="6.1.5">
+    <meta name="version" content="6.2.2">
     <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
@@ -25,7 +25,7 @@
     <div id="root"><div style="display:flex;align-items:center;justify-content:center;min-height:100vh;"><div style="text-align:center;"><div style="font-size:48px;margin-bottom:20px;">🎮</div>Loading...</div></div></div>
 
     <script type="text/babel">
-    console.log('Command Center v6.1.5 starting...');
+    console.log('Command Center v6.2.2 starting...');
     
     // =========================================================================
     // FIREBASE CONFIG
@@ -94,6 +94,126 @@
         if (titleMatch) return titleMatch[1];
         
         return null;
+    }
+    
+    // Find ALL version-like strings in HTML for debugging
+    function findAllVersionStrings(content) {
+        const versions = [];
+        
+        // Meta tag versions
+        const metaMatches = content.matchAll(/<meta\s+[^>]*name=["']version["'][^>]*content=["']([^"']+)["'][^>]*>/gi);
+        for (const m of metaMatches) {
+            versions.push({ source: 'meta tag', value: m[1], line: content.substring(0, m.index).split('\n').length });
+        }
+        // Also check reverse order: content before name
+        const metaMatches2 = content.matchAll(/<meta\s+[^>]*content=["']([^"']+)["'][^>]*name=["']version["'][^>]*>/gi);
+        for (const m of metaMatches2) {
+            versions.push({ source: 'meta tag', value: m[1], line: content.substring(0, m.index).split('\n').length });
+        }
+        
+        // JS variable versions - but NOT inside comments or the integration module definition
+        const jsMatches = content.matchAll(/^\s*const\s+(VERSION|APP_VERSION|GAME_VERSION)\s*=\s*['"]([^'"]+)['"]/gm);
+        for (const m of jsMatches) {
+            // Skip if it's inside the GameShelf integration module (those are module versions, not app versions)
+            const before = content.substring(Math.max(0, m.index - 200), m.index);
+            if (!before.includes('GAMESHELF_VERSION') && !before.includes('Integration Module')) {
+                versions.push({ source: `JS: ${m[1]}`, value: m[2], line: content.substring(0, m.index).split('\n').length });
+            }
+        }
+        
+        // Footer versions - look for patterns like "v1.0.0 •" or ">v1.0.0<"
+        const footerMatches = content.matchAll(/[>\s]v(\d+\.\d+\.\d+)\s*[•<·]/g);
+        for (const m of footerMatches) {
+            versions.push({ source: 'footer/visible', value: m[1], line: content.substring(0, m.index).split('\n').length });
+        }
+        
+        // Version in about/info sections
+        const aboutMatches = content.matchAll(/Version:?\s*<\/?\w*>?\s*v?(\d+\.\d+\.\d+)/gi);
+        for (const m of aboutMatches) {
+            versions.push({ source: 'about/info text', value: m[1], line: content.substring(0, m.index).split('\n').length });
+        }
+        
+        return versions;
+    }
+    
+    // Validate version consistency in HTML content
+    function validateVersions(content, filename) {
+        const versions = findAllVersionStrings(content);
+        const primary = extractVersionFromHTML(content);
+        
+        // Get unique version values
+        const uniqueVersions = [...new Set(versions.map(v => v.value))];
+        
+        const result = {
+            isValid: true,
+            primary: primary,
+            allVersions: versions,
+            uniqueVersions: uniqueVersions,
+            mismatches: [],
+            missing: []
+        };
+        
+        // Check for mismatches
+        if (uniqueVersions.length > 1) {
+            result.isValid = false;
+            result.mismatches = versions.filter(v => v.value !== primary);
+        }
+        
+        // Check for missing meta tag
+        const hasMeta = versions.some(v => v.source === 'meta tag');
+        if (!hasMeta) {
+            result.isValid = false;
+            result.missing.push('meta tag');
+        }
+        
+        // Check for missing JS VERSION constant (for apps that should have one)
+        const hasJsVersion = versions.some(v => v.source.startsWith('JS:'));
+        if (!hasJsVersion && content.includes('const VERSION')) {
+            // There's a VERSION constant but we didn't capture it - might be okay
+        }
+        
+        return result;
+    }
+    
+    // Auto-fix version strings in HTML content
+    function fixVersionsInContent(content, targetVersion) {
+        let fixed = content;
+        
+        // Fix or add meta tag
+        const metaRegex = /<meta\s+name=["']version["']\s+content=["'][^"']*["']\s*\/?>/i;
+        const metaRegex2 = /<meta\s+content=["'][^"']*["']\s+name=["']version["']\s*\/?>/i;
+        
+        if (metaRegex.test(fixed)) {
+            fixed = fixed.replace(metaRegex, `<meta name="version" content="${targetVersion}">`);
+        } else if (metaRegex2.test(fixed)) {
+            fixed = fixed.replace(metaRegex2, `<meta name="version" content="${targetVersion}">`);
+        } else {
+            // Add meta tag after charset or viewport
+            fixed = fixed.replace(
+                /(<meta\s+[^>]*viewport[^>]*>)/i,
+                `$1\n    <meta name="version" content="${targetVersion}">`
+            );
+        }
+        
+        // Fix const VERSION = 'x.x.x' (but not GAMESHELF_VERSION)
+        fixed = fixed.replace(
+            /(const\s+VERSION\s*=\s*['"])[^'"]*(['"])/g,
+            `$1${targetVersion}$2`
+        );
+        
+        // Fix footer versions like "v1.0.0 •" or "v1.0.0 ·"
+        fixed = fixed.replace(
+            /(>\s*)v\d+\.\d+\.\d+(\s*[•·])/g,
+            `$1v${targetVersion}$2`
+        );
+        
+        // Fix about/version display
+        fixed = fixed.replace(
+            /(Version:?\s*<\/?\w*>?\s*)v?\d+\.\d+\.\d+/gi,
+            `$1v${targetVersion}`
+        );
+        
+        return fixed;
     }
     
     function parseVersion(version) {
@@ -752,19 +872,34 @@
                     const parsed = parseFilename(file.name);
                     let version = null;
                     let versionSource = 'none';
+                    let versionValidation = null;
                     
                     if (file.name.endsWith('.html') && isText) {
                         const htmlVersion = extractVersionFromHTML(content);
                         version = htmlVersion || parsed.version;
                         versionSource = htmlVersion ? 'html' : (parsed.version ? 'filename' : 'none');
+                        
+                        // Full version validation
+                        versionValidation = validateVersions(content, file.name);
+                        
+                        console.log('=== VERSION VALIDATION ===');
+                        console.log('File:', file.name);
+                        console.log('Primary version:', versionValidation.primary);
+                        console.log('All versions found:', versionValidation.allVersions);
+                        console.log('Unique versions:', versionValidation.uniqueVersions);
+                        console.log('Is valid:', versionValidation.isValid);
+                        if (!versionValidation.isValid) {
+                            console.warn('⚠️ VERSION ISSUES:', {
+                                mismatches: versionValidation.mismatches,
+                                missing: versionValidation.missing
+                            });
+                        }
                     }
                     
                     console.log('=== FILE UPLOADED ===');
                     console.log('Name:', file.name);
                     console.log('Size:', file.size);
-                    console.log('Version extracted:', version);
-                    console.log('Content length:', content.length);
-                    console.log('Content preview (first 200 chars):', content.substring(0, 200));
+                    console.log('Version:', version);
                     
                     setStagedFiles(prev => [...prev, {
                         id: Date.now() + Math.random(),
@@ -776,6 +911,7 @@
                         suggestedApp: parsed.app,
                         version,
                         versionSource,
+                        versionValidation,
                         // Default HTML files to index.html, others keep original name
                         targetPath: file.name.endsWith('.html') ? 'index.html' : file.name
                     }]);
@@ -916,15 +1052,6 @@
             if (!github) return alert('Configure GitHub token');
             if (files.length === 0) return;
             
-            // Log file details for debugging
-            console.log('handleBatchDeploy received:', files.map(f => ({
-                name: f.name,
-                id: f.id,
-                targetPath: f.targetPath,
-                contentLength: f.content?.length,
-                contentPreview: f.content?.substring(0, 100)
-            })));
-            
             const app = apps[appId];
             const repo = target === 'prod' ? app.prodRepo : app.testRepo;
             if (!repo) return alert(`Configure ${target} repo`);
@@ -932,6 +1059,49 @@
             // Find version from index.html if present
             const indexFile = files.find(f => f.targetPath === 'index.html' || f.name === 'index.html');
             const newVersion = indexFile?.version || 'batch';
+            
+            // Check for version validation issues in any file
+            const filesWithIssues = files.filter(f => f.versionValidation && !f.versionValidation.isValid);
+            if (filesWithIssues.length > 0) {
+                const proceed = confirm(
+                    `⚠️ VERSION ISSUES DETECTED!\n\n` +
+                    filesWithIssues.map(f => {
+                        const v = f.versionValidation;
+                        let msg = `${f.name}:\n`;
+                        if (v.missing.length > 0) msg += `  • Missing: ${v.missing.join(', ')}\n`;
+                        if (v.uniqueVersions.length > 1) msg += `  • Mismatched versions: ${v.uniqueVersions.join(', ')}\n`;
+                        return msg;
+                    }).join('\n') +
+                    `\nYou can click "Fix to v${newVersion}" on each file to auto-correct.\n\n` +
+                    `Deploy anyway with inconsistent versions?`
+                );
+                if (!proceed) return;
+            }
+            
+            // Check version increment against current repo version
+            if (newVersion !== 'batch') {
+                const currentVersion = target === 'prod' ? app.currentProdVersion : app.currentTestVersion;
+                if (currentVersion && !isNewerVersion(newVersion, currentVersion)) {
+                    const proceed = confirm(
+                        `⚠️ VERSION NOT INCREMENTING!\n\n` +
+                        `Current in ${target.toUpperCase()}: v${currentVersion}\n` +
+                        `New version: v${newVersion}\n\n` +
+                        `This may be a downgrade or same version.\n` +
+                        `Deploy anyway?`
+                    );
+                    if (!proceed) return;
+                }
+            }
+            
+            // Log file details for debugging
+            console.log('handleBatchDeploy received:', files.map(f => ({
+                name: f.name,
+                id: f.id,
+                targetPath: f.targetPath,
+                version: f.version,
+                validationOk: f.versionValidation?.isValid,
+                contentLength: f.content?.length
+            })));
             
             const deployment = {
                 id: Date.now(), status: 'running', steps: [],
@@ -1272,7 +1442,7 @@
                             <span className="text-2xl">🎮</span>
                             <div>
                                 <h1 className="text-lg font-bold">Command Center</h1>
-                                <div className="text-xs text-slate-400">v6.1.5 • Firebase + Multi-File</div>
+                                <div className="text-xs text-slate-400">v6.2.2 • App Menus</div>
                             </div>
                         </div>
                         <div className="flex items-center gap-2">
@@ -1552,6 +1722,138 @@
         const [deployTarget, setDeployTarget] = React.useState({ appId: 'management', target: 'test' });
         const configuredApps = Object.values(apps).filter(a => a.testRepo || a.prodRepo);
         
+        // Expanded app menus state
+        const [expandedApps, setExpandedApps] = React.useState({});
+        const [appInfo, setAppInfo] = React.useState({}); // { appId: { test: {...}, prod: {...} } }
+        const [loadingAppInfo, setLoadingAppInfo] = React.useState({});
+        
+        // Toggle app menu expansion
+        const toggleAppExpanded = async (appId) => {
+            const newExpanded = !expandedApps[appId];
+            setExpandedApps(prev => ({ ...prev, [appId]: newExpanded }));
+            
+            // Fetch app info if expanding and not already loaded
+            if (newExpanded && !appInfo[appId] && github) {
+                await fetchAppInfo(appId);
+            }
+        };
+        
+        // Fetch commit history and info for an app
+        const fetchAppInfo = async (appId) => {
+            const app = apps[appId];
+            if (!app || !github) return;
+            
+            setLoadingAppInfo(prev => ({ ...prev, [appId]: true }));
+            
+            const info = { test: null, prod: null };
+            
+            try {
+                if (app.testRepo) {
+                    const [owner, repo] = app.testRepo.split('/');
+                    const commits = await github.request(`/repos/${owner}/${repo}/commits?per_page=5`);
+                    const repoData = await github.request(`/repos/${owner}/${repo}`);
+                    info.test = {
+                        lastCommit: commits[0],
+                        recentCommits: commits,
+                        pushedAt: repoData.pushed_at
+                    };
+                }
+            } catch (e) {
+                console.error('Error fetching test repo info:', e);
+            }
+            
+            try {
+                if (app.prodRepo) {
+                    const [owner, repo] = app.prodRepo.split('/');
+                    const commits = await github.request(`/repos/${owner}/${repo}/commits?per_page=5`);
+                    const repoData = await github.request(`/repos/${owner}/${repo}`);
+                    info.prod = {
+                        lastCommit: commits[0],
+                        recentCommits: commits,
+                        pushedAt: repoData.pushed_at
+                    };
+                }
+            } catch (e) {
+                console.error('Error fetching prod repo info:', e);
+            }
+            
+            setAppInfo(prev => ({ ...prev, [appId]: info }));
+            setLoadingAppInfo(prev => ({ ...prev, [appId]: false }));
+        };
+        
+        // Force GitHub Pages rebuild by creating an empty commit
+        const forceRebuild = async (repo, target, silent = false) => {
+            if (!github || !repo) return;
+            
+            if (!silent) {
+                const confirmed = confirm(`Force rebuild ${target.toUpperCase()} site?\n\nThis creates an empty commit to trigger GitHub Pages deployment.`);
+                if (!confirmed) return;
+            }
+            
+            try {
+                const [owner, repoName] = repo.split('/');
+                
+                // Get current commit
+                const ref = await github.request(`/repos/${owner}/${repoName}/git/ref/heads/main`);
+                const currentSha = ref.object.sha;
+                
+                // Get current commit details
+                const commit = await github.request(`/repos/${owner}/${repoName}/git/commits/${currentSha}`);
+                
+                // Create new commit with same tree (empty commit)
+                const newCommit = await github.request(`/repos/${owner}/${repoName}/git/commits`, {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        message: `Force rebuild - ${new Date().toISOString()}`,
+                        tree: commit.tree.sha,
+                        parents: [currentSha]
+                    })
+                });
+                
+                // Update ref
+                await github.request(`/repos/${owner}/${repoName}/git/refs/heads/main`, {
+                    method: 'PATCH',
+                    body: JSON.stringify({ sha: newCommit.sha })
+                });
+                
+                if (!silent) {
+                    alert(`✓ Rebuild triggered for ${target.toUpperCase()}!\n\nGitHub Pages should update in 30-90 seconds.`);
+                }
+                
+                // Refresh app info
+                const appId = Object.entries(apps).find(([id, a]) => a.testRepo === repo || a.prodRepo === repo)?.[0];
+                if (appId) {
+                    setAppInfo(prev => ({ ...prev, [appId]: null }));
+                    fetchAppInfo(appId);
+                }
+                
+                return true;
+                
+            } catch (e) {
+                if (!silent) {
+                    alert(`Error triggering rebuild: ${e.message}`);
+                }
+                return false;
+            }
+        };
+        
+        // Format relative time
+        const formatRelativeTime = (dateStr) => {
+            if (!dateStr) return '—';
+            const date = new Date(dateStr);
+            const now = new Date();
+            const diffMs = now - date;
+            const diffMins = Math.floor(diffMs / 60000);
+            const diffHours = Math.floor(diffMs / 3600000);
+            const diffDays = Math.floor(diffMs / 86400000);
+            
+            if (diffMins < 1) return 'just now';
+            if (diffMins < 60) return `${diffMins}m ago`;
+            if (diffHours < 24) return `${diffHours}h ago`;
+            if (diffDays < 7) return `${diffDays}d ago`;
+            return date.toLocaleDateString();
+        };
+        
         // Get actual selected files from staged (ensures fresh content)
         const selectedFiles = stagedFiles.filter(f => selectedFileIds.has(f.id));
         
@@ -1675,6 +1977,60 @@
                                                             <span>⚠️</span> Will create new file (won't replace index.html)
                                                         </div>
                                                     )}
+                                                    
+                                                    {/* Version warnings */}
+                                                    {f.versionValidation && !f.versionValidation.isValid && (
+                                                        <div className="mt-2 p-2 bg-red-900/30 border border-red-700 rounded">
+                                                            <div className="flex items-center justify-between mb-2">
+                                                                <div className="text-xs font-medium text-red-300 flex items-center gap-1">
+                                                                    🔴 Version Issues Detected
+                                                                </div>
+                                                                <button 
+                                                                    onClick={(e) => {
+                                                                        e.stopPropagation();
+                                                                        const targetVersion = f.version || prompt('Enter target version (e.g., 1.0.0):');
+                                                                        if (targetVersion) {
+                                                                            const fixedContent = fixVersionsInContent(f.content, targetVersion);
+                                                                            const newValidation = validateVersions(fixedContent, f.name);
+                                                                            onUpdateStagedFile(f.id, { 
+                                                                                content: fixedContent,
+                                                                                version: targetVersion,
+                                                                                versionValidation: newValidation
+                                                                            });
+                                                                        }
+                                                                    }}
+                                                                    className="px-2 py-1 bg-green-700 hover:bg-green-600 text-xs rounded flex items-center gap-1">
+                                                                    🔧 Fix to v{f.version || '?'}
+                                                                </button>
+                                                            </div>
+                                                            
+                                                            {f.versionValidation.missing.length > 0 && (
+                                                                <div className="text-xs text-amber-300 mb-1">
+                                                                    Missing: {f.versionValidation.missing.join(', ')}
+                                                                </div>
+                                                            )}
+                                                            
+                                                            {f.versionValidation.uniqueVersions.length > 1 && (
+                                                                <div className="text-xs text-red-300 mb-1">
+                                                                    Found {f.versionValidation.uniqueVersions.length} different versions: {f.versionValidation.uniqueVersions.join(', ')}
+                                                                </div>
+                                                            )}
+                                                            
+                                                            <div className="text-xs text-slate-400 space-y-0.5 max-h-24 overflow-auto">
+                                                                {f.versionValidation.allVersions.map((v, i) => (
+                                                                    <div key={i} className={v.value === f.versionValidation.primary ? 'text-green-400' : 'text-red-300'}>
+                                                                        {v.value} ← {v.source} (line {v.line})
+                                                                    </div>
+                                                                ))}
+                                                            </div>
+                                                        </div>
+                                                    )}
+                                                    
+                                                    {f.versionValidation && f.versionValidation.isValid && (
+                                                        <div className="mt-2 text-xs text-green-400 flex items-center gap-1">
+                                                            ✓ All {f.versionValidation.allVersions.length} version strings match (v{f.versionValidation.primary})
+                                                        </div>
+                                                    )}
                                                 </div>
                                             </div>
                                             <button onClick={e => { 
@@ -1786,50 +2142,215 @@
                                 const prodUrl = getGitHubPagesUrl(app.prodRepo);
                                 const testDeploying = deployingRepos && deployingRepos[app.testRepo];
                                 const prodDeploying = deployingRepos && deployingRepos[app.prodRepo];
+                                const isExpanded = expandedApps[app.id];
+                                const info = appInfo[app.id];
+                                const isLoadingInfo = loadingAppInfo[app.id];
                                 
                                 return (
-                                    <div key={app.id} className="p-3 bg-slate-700/50 rounded-lg">
-                                        <div className="flex items-center gap-2 mb-2">
-                                            <span>{app.icon}</span>
-                                            <span className="font-medium flex-1">{app.name}</span>
-                                            {canPromote && (
-                                                <button onClick={() => onPromote(app.id)}
-                                                    className="px-2 py-1 bg-amber-600 text-xs rounded flex items-center gap-1">
-                                                    <Icons.Zap className="w-3 h-3" /> Promote
-                                                </button>
-                                            )}
-                                        </div>
-                                        {/* Show mapped repos */}
-                                        <div className="text-xs text-slate-500 mb-2 font-mono">
-                                            {app.testRepo ? app.testRepo.split('/')[1] : '(no test repo)'} → {app.prodRepo ? app.prodRepo.split('/')[1] : '(no prod repo)'}
-                                        </div>
-                                        <div className="flex items-center gap-2 text-xs">
-                                            <div className="flex items-center gap-1">
-                                                <span className={`px-2 py-0.5 rounded ${app.currentTestVersion ? 'bg-blue-900/50 text-blue-300' : 'bg-slate-600 text-slate-400'}`}>
-                                                    TEST: {formatVersion(app.currentTestVersion)}
-                                                </span>
-                                                {testUrl && (
-                                                    <a href={testUrl} target="_blank" 
-                                                        className={`p-1 rounded flex items-center ${testDeploying ? 'bg-red-900/50 text-red-400 animate-pulse' : 'hover:bg-slate-600 text-slate-400'}`} 
-                                                        title={testDeploying ? `Deploying v${testDeploying.version}...` : 'Open TEST'}>
-                                                        <Icons.Play />
-                                                    </a>
+                                    <div key={app.id} className="bg-slate-700/50 rounded-lg overflow-hidden">
+                                        {/* Header - clickable to expand */}
+                                        <div 
+                                            className="p-3 cursor-pointer hover:bg-slate-700/70"
+                                            onClick={() => toggleAppExpanded(app.id)}
+                                        >
+                                            <div className="flex items-center gap-2 mb-2">
+                                                <span className={`transform transition-transform ${isExpanded ? 'rotate-90' : ''}`}>▶</span>
+                                                <span>{app.icon}</span>
+                                                <span className="font-medium flex-1">{app.name}</span>
+                                                {canPromote && (
+                                                    <button onClick={(e) => { e.stopPropagation(); onPromote(app.id); }}
+                                                        className="px-2 py-1 bg-amber-600 text-xs rounded flex items-center gap-1">
+                                                        <Icons.Zap className="w-3 h-3" /> Promote
+                                                    </button>
                                                 )}
                                             </div>
-                                            <Icons.ArrowRight className="w-4 h-4 text-slate-500" />
-                                            <div className="flex items-center gap-1">
-                                                <span className={`px-2 py-0.5 rounded ${app.currentProdVersion ? 'bg-green-900/50 text-green-300' : 'bg-slate-600 text-slate-400'}`}>
-                                                    PROD: {formatVersion(app.currentProdVersion)}
-                                                </span>
-                                                {prodUrl && (
-                                                    <a href={prodUrl} target="_blank" 
-                                                        className={`p-1 rounded flex items-center ${prodDeploying ? 'bg-red-900/50 text-red-400 animate-pulse' : 'hover:bg-slate-600 text-slate-400'}`} 
-                                                        title={prodDeploying ? `Deploying v${prodDeploying.version}...` : 'Open PROD'}>
-                                                        <Icons.Play />
-                                                    </a>
-                                                )}
+                                            {/* Show mapped repos */}
+                                            <div className="text-xs text-slate-500 mb-2 font-mono ml-6">
+                                                {app.testRepo ? app.testRepo.split('/')[1] : '(no test repo)'} → {app.prodRepo ? app.prodRepo.split('/')[1] : '(no prod repo)'}
+                                            </div>
+                                            <div className="flex items-center gap-2 text-xs ml-6">
+                                                <div className="flex items-center gap-1">
+                                                    <span className={`px-2 py-0.5 rounded ${app.currentTestVersion ? 'bg-blue-900/50 text-blue-300' : 'bg-slate-600 text-slate-400'}`}>
+                                                        TEST: {formatVersion(app.currentTestVersion)}
+                                                    </span>
+                                                    {testUrl && (
+                                                        <a href={testUrl} target="_blank" 
+                                                            onClick={e => e.stopPropagation()}
+                                                            className={`p-1 rounded flex items-center ${testDeploying ? 'bg-red-900/50 text-red-400 animate-pulse' : 'hover:bg-slate-600 text-slate-400'}`} 
+                                                            title={testDeploying ? `Deploying v${testDeploying.version}...` : 'Open TEST'}>
+                                                            <Icons.Play />
+                                                        </a>
+                                                    )}
+                                                </div>
+                                                <Icons.ArrowRight className="w-4 h-4 text-slate-500" />
+                                                <div className="flex items-center gap-1">
+                                                    <span className={`px-2 py-0.5 rounded ${app.currentProdVersion ? 'bg-green-900/50 text-green-300' : 'bg-slate-600 text-slate-400'}`}>
+                                                        PROD: {formatVersion(app.currentProdVersion)}
+                                                    </span>
+                                                    {prodUrl && (
+                                                        <a href={prodUrl} target="_blank" 
+                                                            onClick={e => e.stopPropagation()}
+                                                            className={`p-1 rounded flex items-center ${prodDeploying ? 'bg-red-900/50 text-red-400 animate-pulse' : 'hover:bg-slate-600 text-slate-400'}`} 
+                                                            title={prodDeploying ? `Deploying v${prodDeploying.version}...` : 'Open PROD'}>
+                                                            <Icons.Play />
+                                                        </a>
+                                                    )}
+                                                </div>
                                             </div>
                                         </div>
+                                        
+                                        {/* Expanded Menu */}
+                                        {isExpanded && (
+                                            <div className="border-t border-slate-600 bg-slate-800/50 p-3 space-y-3">
+                                                {isLoadingInfo ? (
+                                                    <div className="flex items-center gap-2 text-slate-400 text-sm">
+                                                        <div className="w-4 h-4 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin" />
+                                                        Loading...
+                                                    </div>
+                                                ) : (
+                                                    <>
+                                                        {/* TEST Environment */}
+                                                        {app.testRepo && (
+                                                            <div className="p-2 bg-blue-900/20 rounded border border-blue-800/50">
+                                                                <div className="flex items-center justify-between mb-2">
+                                                                    <span className="text-sm font-medium text-blue-300">🧪 TEST Environment</span>
+                                                                    <button 
+                                                                        onClick={() => forceRebuild(app.testRepo, 'test')}
+                                                                        className="px-2 py-1 bg-blue-700 hover:bg-blue-600 text-xs rounded">
+                                                                        🔄 Force Rebuild
+                                                                    </button>
+                                                                </div>
+                                                                {info?.test ? (
+                                                                    <div className="text-xs space-y-1">
+                                                                        <div className="flex justify-between">
+                                                                            <span className="text-slate-400">Last push:</span>
+                                                                            <span>{formatRelativeTime(info.test.pushedAt)}</span>
+                                                                        </div>
+                                                                        <div className="flex justify-between">
+                                                                            <span className="text-slate-400">Last commit:</span>
+                                                                            <span className="font-mono">{info.test.lastCommit?.sha?.substring(0, 7) || '—'}</span>
+                                                                        </div>
+                                                                        <div className="text-slate-500 truncate" title={info.test.lastCommit?.commit?.message}>
+                                                                            "{info.test.lastCommit?.commit?.message?.substring(0, 40) || '—'}"
+                                                                        </div>
+                                                                        {info.test.recentCommits?.length > 1 && (
+                                                                            <details className="mt-2">
+                                                                                <summary className="cursor-pointer text-slate-400 hover:text-white">
+                                                                                    Recent commits ({info.test.recentCommits.length})
+                                                                                </summary>
+                                                                                <div className="mt-1 space-y-1 pl-2 border-l border-slate-600">
+                                                                                    {info.test.recentCommits.slice(0, 5).map((c, i) => (
+                                                                                        <div key={i} className="text-slate-400">
+                                                                                            <span className="font-mono text-slate-500">{c.sha.substring(0, 7)}</span>
+                                                                                            {' '}{c.commit.message.substring(0, 30)}
+                                                                                        </div>
+                                                                                    ))}
+                                                                                </div>
+                                                                            </details>
+                                                                        )}
+                                                                    </div>
+                                                                ) : (
+                                                                    <div className="text-xs text-slate-500">No data loaded</div>
+                                                                )}
+                                                            </div>
+                                                        )}
+                                                        
+                                                        {/* PROD Environment */}
+                                                        {app.prodRepo && (
+                                                            <div className="p-2 bg-green-900/20 rounded border border-green-800/50">
+                                                                <div className="flex items-center justify-between mb-2">
+                                                                    <span className="text-sm font-medium text-green-300">🚀 PROD Environment</span>
+                                                                    <button 
+                                                                        onClick={() => forceRebuild(app.prodRepo, 'prod')}
+                                                                        className="px-2 py-1 bg-green-700 hover:bg-green-600 text-xs rounded">
+                                                                        🔄 Force Rebuild
+                                                                    </button>
+                                                                </div>
+                                                                {info?.prod ? (
+                                                                    <div className="text-xs space-y-1">
+                                                                        <div className="flex justify-between">
+                                                                            <span className="text-slate-400">Last push:</span>
+                                                                            <span>{formatRelativeTime(info.prod.pushedAt)}</span>
+                                                                        </div>
+                                                                        <div className="flex justify-between">
+                                                                            <span className="text-slate-400">Last commit:</span>
+                                                                            <span className="font-mono">{info.prod.lastCommit?.sha?.substring(0, 7) || '—'}</span>
+                                                                        </div>
+                                                                        <div className="text-slate-500 truncate" title={info.prod.lastCommit?.commit?.message}>
+                                                                            "{info.prod.lastCommit?.commit?.message?.substring(0, 40) || '—'}"
+                                                                        </div>
+                                                                        {info.prod.recentCommits?.length > 1 && (
+                                                                            <details className="mt-2">
+                                                                                <summary className="cursor-pointer text-slate-400 hover:text-white">
+                                                                                    Recent commits ({info.prod.recentCommits.length})
+                                                                                </summary>
+                                                                                <div className="mt-1 space-y-1 pl-2 border-l border-slate-600">
+                                                                                    {info.prod.recentCommits.slice(0, 5).map((c, i) => (
+                                                                                        <div key={i} className="text-slate-400">
+                                                                                            <span className="font-mono text-slate-500">{c.sha.substring(0, 7)}</span>
+                                                                                            {' '}{c.commit.message.substring(0, 30)}
+                                                                                        </div>
+                                                                                    ))}
+                                                                                </div>
+                                                                            </details>
+                                                                        )}
+                                                                    </div>
+                                                                ) : (
+                                                                    <div className="text-xs text-slate-500">No data loaded</div>
+                                                                )}
+                                                            </div>
+                                                        )}
+                                                        
+                                                        {/* Quick Actions */}
+                                                        <div className="flex flex-wrap gap-2 pt-2 border-t border-slate-600">
+                                                            {/* Force Propagate TEST → PROD */}
+                                                            {app.testRepo && app.prodRepo && (
+                                                                <button 
+                                                                    onClick={() => onPromote(app.id)}
+                                                                    className="px-2 py-1 bg-amber-600 hover:bg-amber-500 text-xs rounded flex items-center gap-1">
+                                                                    <Icons.Zap className="w-3 h-3" /> Force Propagate TEST → PROD
+                                                                </button>
+                                                            )}
+                                                            
+                                                            {/* Force Rebuild All */}
+                                                            {(app.testRepo || app.prodRepo) && (
+                                                                <button 
+                                                                    onClick={async () => {
+                                                                        const confirmed = confirm(`Force rebuild ALL environments for ${app.name}?\n\nThis will trigger GitHub Pages rebuild for both TEST and PROD.`);
+                                                                        if (!confirmed) return;
+                                                                        
+                                                                        if (app.testRepo) await forceRebuild(app.testRepo, 'test', true);
+                                                                        if (app.prodRepo) await forceRebuild(app.prodRepo, 'prod', true);
+                                                                        
+                                                                        alert(`✓ Rebuild triggered for all ${app.name} environments!`);
+                                                                    }}
+                                                                    className="px-2 py-1 bg-indigo-600 hover:bg-indigo-500 text-xs rounded flex items-center gap-1">
+                                                                    🔄 Rebuild All
+                                                                </button>
+                                                            )}
+                                                            
+                                                            {app.testRepo && (
+                                                                <a href={`https://github.com/${app.testRepo}`} target="_blank"
+                                                                    className="px-2 py-1 bg-slate-700 hover:bg-slate-600 text-xs rounded flex items-center gap-1">
+                                                                    <Icons.ExternalLink className="w-3 h-3" /> TEST Repo
+                                                                </a>
+                                                            )}
+                                                            {app.prodRepo && (
+                                                                <a href={`https://github.com/${app.prodRepo}`} target="_blank"
+                                                                    className="px-2 py-1 bg-slate-700 hover:bg-slate-600 text-xs rounded flex items-center gap-1">
+                                                                    <Icons.ExternalLink className="w-3 h-3" /> PROD Repo
+                                                                </a>
+                                                            )}
+                                                            <button 
+                                                                onClick={() => fetchAppInfo(app.id)}
+                                                                className="px-2 py-1 bg-slate-700 hover:bg-slate-600 text-xs rounded flex items-center gap-1">
+                                                                <Icons.Refresh className="w-3 h-3" /> Refresh Info
+                                                            </button>
+                                                        </div>
+                                                    </>
+                                                )}
+                                            </div>
+                                        )}
                                     </div>
                                 );
                             })}
@@ -1852,6 +2373,8 @@
         const currentFiles = repoFiles[selectedRepo]?.files || [];
         const isLoading = repoFiles[selectedRepo]?.loading;
         
+        const [versionAudit, setVersionAudit] = React.useState(null);
+        
         const toggleMarkForDeletion = (file) => {
             const existing = markedForDeletion.find(m => m.repo === selectedRepo && m.path === file.path);
             if (existing) {
@@ -1862,6 +2385,30 @@
         };
         
         const isMarked = (file) => markedForDeletion.some(m => m.repo === selectedRepo && m.path === file.path);
+        
+        const handleVersionAudit = async () => {
+            if (!github || !selectedRepo) return;
+            setVersionAudit({ loading: true });
+            
+            try {
+                const file = await github.getFile(selectedRepo, 'index.html');
+                if (file) {
+                    const content = atob(file.content);
+                    const versions = findAllVersionStrings(content);
+                    const primary = extractVersionFromHTML(content);
+                    
+                    // Check for mismatches
+                    const uniqueVersions = [...new Set(versions.map(v => v.value))];
+                    const hasMismatch = uniqueVersions.length > 1;
+                    
+                    setVersionAudit({ loading: false, versions, primary, hasMismatch, uniqueVersions });
+                } else {
+                    setVersionAudit({ loading: false, error: 'index.html not found' });
+                }
+            } catch (e) {
+                setVersionAudit({ loading: false, error: e.message });
+            }
+        };
         
         return (
             <div className="space-y-6">
@@ -1898,6 +2445,67 @@
                                 className="px-3 py-1.5 bg-slate-700 rounded text-sm flex items-center gap-1">
                                 <Icons.ExternalLink /> GitHub
                             </a>
+                            <button onClick={handleVersionAudit}
+                                className="px-3 py-1.5 bg-amber-700 rounded text-sm flex items-center gap-1">
+                                🔍 Version Audit
+                            </button>
+                        </div>
+                    )}
+                    
+                    {/* Version Audit Results */}
+                    {versionAudit && (
+                        <div className={`mb-4 p-4 rounded-lg border ${versionAudit.hasMismatch ? 'bg-red-900/30 border-red-700' : 'bg-slate-700/50 border-slate-600'}`}>
+                            <div className="flex items-center justify-between mb-3">
+                                <h3 className="font-semibold flex items-center gap-2">
+                                    {versionAudit.loading ? (
+                                        <>
+                                            <div className="w-4 h-4 border-2 border-amber-400 border-t-transparent rounded-full animate-spin" />
+                                            Scanning...
+                                        </>
+                                    ) : versionAudit.hasMismatch ? (
+                                        <><span className="text-red-400">⚠️ Version Mismatch Found!</span></>
+                                    ) : (
+                                        <><span className="text-green-400">✓ Versions Consistent</span></>
+                                    )}
+                                </h3>
+                                <button onClick={() => setVersionAudit(null)} className="text-slate-400 hover:text-white">
+                                    <Icons.X />
+                                </button>
+                            </div>
+                            
+                            {versionAudit.error && (
+                                <div className="text-red-400 text-sm">{versionAudit.error}</div>
+                            )}
+                            
+                            {versionAudit.versions && (
+                                <>
+                                    <div className="text-sm mb-2">
+                                        <span className="text-slate-400">Primary version (meta tag): </span>
+                                        <span className="font-mono text-green-400">{versionAudit.primary || 'Not found'}</span>
+                                    </div>
+                                    
+                                    {versionAudit.hasMismatch && (
+                                        <div className="text-sm mb-2 text-amber-400">
+                                            Found {versionAudit.uniqueVersions.length} different versions: {versionAudit.uniqueVersions.join(', ')}
+                                        </div>
+                                    )}
+                                    
+                                    <div className="text-xs text-slate-400 mb-2">Found {versionAudit.versions.length} version string(s):</div>
+                                    <div className="space-y-1 max-h-48 overflow-auto">
+                                        {versionAudit.versions.map((v, i) => (
+                                            <div key={i} className={`text-xs p-2 rounded ${v.value === versionAudit.primary ? 'bg-green-900/30' : 'bg-red-900/30'}`}>
+                                                <div className="flex items-center gap-2">
+                                                    <span className={`font-mono ${v.value === versionAudit.primary ? 'text-green-400' : 'text-red-400'}`}>
+                                                        {v.value}
+                                                    </span>
+                                                    <span className="text-slate-500">← {v.source}</span>
+                                                </div>
+                                                <div className="text-slate-500 font-mono truncate mt-1">{v.context}</div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </>
+                            )}
                         </div>
                     )}
                     
