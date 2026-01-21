@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Game Shelf Command Center</title>
-    <meta name="version" content="6.2.2">
+    <meta name="version" content="6.4.0">
     <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
@@ -25,7 +25,7 @@
     <div id="root"><div style="display:flex;align-items:center;justify-content:center;min-height:100vh;"><div style="text-align:center;"><div style="font-size:48px;margin-bottom:20px;">🎮</div>Loading...</div></div></div>
 
     <script type="text/babel">
-    console.log('Command Center v6.2.2 starting...');
+    console.log('Command Center v6.4.0 starting...');
     
     // =========================================================================
     // FIREBASE CONFIG
@@ -682,12 +682,60 @@
         const [activeDeployment, setActiveDeployment] = React.useState(null);
         const [availableRepos, setAvailableRepos] = React.useState([]);
         const [modal, setModal] = React.useState(null);
+        const [dialog, setDialog] = React.useState(null); // { type: 'alert'|'confirm'|'prompt', title, message, defaultValue, onConfirm, onCancel }
         const [settings, setSettings] = React.useState({ createTag: true, updateServiceWorker: true });
+        
+        // Dialog helper functions (Promise-based for async usage)
+        const showAlert = (message, title) => {
+            return new Promise((resolve) => {
+                setDialog({ type: 'alert', title, message, onConfirm: resolve });
+            });
+        };
+        
+        const showConfirm = (message, title) => {
+            return new Promise((resolve) => {
+                setDialog({ 
+                    type: 'confirm', 
+                    title, 
+                    message, 
+                    onConfirm: () => resolve(true),
+                    onCancel: () => resolve(false)
+                });
+            });
+        };
+        
+        const showPrompt = (message, defaultValue, title) => {
+            return new Promise((resolve) => {
+                setDialog({ 
+                    type: 'prompt', 
+                    title, 
+                    message, 
+                    defaultValue,
+                    onConfirm: (value) => resolve(value),
+                    onCancel: () => resolve(null)
+                });
+            });
+        };
         const [refreshing, setRefreshing] = React.useState(false);
         const [repoFiles, setRepoFiles] = React.useState({}); // { repoFullName: { files: [], loading: bool } }
         const [selectedRepoForBrowse, setSelectedRepoForBrowse] = React.useState(null);
         const [markedForDeletion, setMarkedForDeletion] = React.useState([]); // [{ repo, path, sha }]
         const [deployingRepos, setDeployingRepos] = React.useState({}); // { repoFullName: { version, startTime } }
+        
+        // Session log state (persisted to localStorage)
+        const [sessionLog, setSessionLog] = React.useState(() => {
+            try { 
+                const s = localStorage.getItem('cc_session_log'); 
+                return s ? JSON.parse(s) : {
+                    currentSession: null,
+                    sessions: [],
+                    issues: [],
+                    notes: ''
+                }; 
+            } catch { 
+                return { currentSession: null, sessions: [], issues: [], notes: '' }; 
+            }
+        });
         
         // Use ref to always have latest apps state for async operations
         const appsRef = React.useRef(apps);
@@ -699,6 +747,7 @@
         React.useEffect(() => { try { if (githubToken) localStorage.setItem('cc_token', githubToken); } catch {} }, [githubToken]);
         React.useEffect(() => { try { localStorage.setItem('cc_apps_v6', JSON.stringify(apps)); } catch {} }, [apps]);
         React.useEffect(() => { try { localStorage.setItem('cc_history_v2', JSON.stringify(deployments.slice(0, 100))); } catch {} }, [deployments]);
+        React.useEffect(() => { try { localStorage.setItem('cc_session_log', JSON.stringify(sessionLog)); } catch {} }, [sessionLog]);
         
         // Monitor live site until new version appears
         const monitorLiveDeployment = async (url, expectedVersion, repo, onUpdate) => {
@@ -1049,12 +1098,18 @@
         
         // Multi-file batch deploy
         const handleBatchDeploy = async (files, appId, target) => {
-            if (!github) return alert('Configure GitHub token');
+            if (!github) {
+                await showAlert('Configure GitHub token first', 'Configuration Required');
+                return;
+            }
             if (files.length === 0) return;
             
             const app = apps[appId];
             const repo = target === 'prod' ? app.prodRepo : app.testRepo;
-            if (!repo) return alert(`Configure ${target} repo`);
+            if (!repo) {
+                await showAlert(`Configure ${target} repo first`, 'Configuration Required');
+                return;
+            }
             
             // Find version from index.html if present
             const indexFile = files.find(f => f.targetPath === 'index.html' || f.name === 'index.html');
@@ -1063,8 +1118,7 @@
             // Check for version validation issues in any file
             const filesWithIssues = files.filter(f => f.versionValidation && !f.versionValidation.isValid);
             if (filesWithIssues.length > 0) {
-                const proceed = confirm(
-                    `⚠️ VERSION ISSUES DETECTED!\n\n` +
+                const proceed = await showConfirm(
                     filesWithIssues.map(f => {
                         const v = f.versionValidation;
                         let msg = `${f.name}:\n`;
@@ -1073,7 +1127,8 @@
                         return msg;
                     }).join('\n') +
                     `\nYou can click "Fix to v${newVersion}" on each file to auto-correct.\n\n` +
-                    `Deploy anyway with inconsistent versions?`
+                    `Deploy anyway with inconsistent versions?`,
+                    '⚠️ Version Issues Detected'
                 );
                 if (!proceed) return;
             }
@@ -1082,12 +1137,12 @@
             if (newVersion !== 'batch') {
                 const currentVersion = target === 'prod' ? app.currentProdVersion : app.currentTestVersion;
                 if (currentVersion && !isNewerVersion(newVersion, currentVersion)) {
-                    const proceed = confirm(
-                        `⚠️ VERSION NOT INCREMENTING!\n\n` +
+                    const proceed = await showConfirm(
                         `Current in ${target.toUpperCase()}: v${currentVersion}\n` +
                         `New version: v${newVersion}\n\n` +
                         `This may be a downgrade or same version.\n` +
-                        `Deploy anyway?`
+                        `Deploy anyway?`,
+                        '⚠️ Version Not Incrementing'
                     );
                     if (!proceed) return;
                 }
@@ -1442,7 +1497,7 @@
                             <span className="text-2xl">🎮</span>
                             <div>
                                 <h1 className="text-lg font-bold">Command Center</h1>
-                                <div className="text-xs text-slate-400">v6.2.2 • App Menus</div>
+                                <div className="text-xs text-slate-400">v6.4.0 • Project Sync</div>
                             </div>
                         </div>
                         <div className="flex items-center gap-2">
@@ -1451,12 +1506,13 @@
                                 title="Refresh versions">
                                 <Icons.Refresh />
                             </button>
-                            {['dashboard', 'files', 'firebase', 'apps', 'history', 'settings'].map(v => (
+                            {['dashboard', 'files', 'firebase', 'session', 'apps', 'history', 'settings'].map(v => (
                                 <button key={v} onClick={() => setView(v)}
                                     className={`px-3 py-1.5 rounded text-sm capitalize flex items-center gap-1 ${view === v ? 'bg-indigo-600' : 'text-slate-400 hover:text-white'}`}>
                                     {v === 'settings' && <Icons.Settings />}
                                     {v === 'files' && <><Icons.Folder /> Files</>}
                                     {v === 'firebase' && <><Icons.Database /> Firebase</>}
+                                    {v === 'session' && <><Icons.File /> Session</>}
                                     {v === 'dashboard' && 'Dashboard'}
                                     {v === 'apps' && 'Apps'}
                                     {v === 'history' && 'History'}
@@ -1484,6 +1540,9 @@
                             refreshing={refreshing}
                             onUpdateStagedFile={updateStagedFile}
                             deployingRepos={deployingRepos}
+                            showConfirm={showConfirm}
+                            showAlert={showAlert}
+                            showPrompt={showPrompt}
                         />
                     )}
                     
@@ -1507,6 +1566,17 @@
                         <HistoryView 
                             deployments={deployments} apps={apps}
                             onRollback={(d) => setModal({ type: 'rollback', data: d })}
+                        />
+                    )}
+                    
+                    {view === 'session' && (
+                        <SessionLogView 
+                            apps={apps}
+                            sessionLog={sessionLog}
+                            setSessionLog={setSessionLog}
+                            deployments={deployments}
+                            github={github}
+                            onFileDrop={handleFileDrop}
                         />
                     )}
                     
@@ -1536,6 +1606,26 @@
                             files={markedForDeletion}
                             onConfirm={handleDeleteMarkedFiles}
                             onCancel={() => setModal(null)}
+                        />
+                    )}
+                    
+                    {/* Custom Dialog Modal (replaces native alert/confirm/prompt) */}
+                    {dialog && (
+                        <DialogModal
+                            type={dialog.type}
+                            title={dialog.title}
+                            message={dialog.message}
+                            defaultValue={dialog.defaultValue}
+                            confirmText={dialog.confirmText}
+                            cancelText={dialog.cancelText}
+                            onConfirm={(value) => {
+                                if (dialog.onConfirm) dialog.onConfirm(value);
+                                setDialog(null);
+                            }}
+                            onCancel={() => {
+                                if (dialog.onCancel) dialog.onCancel();
+                                setDialog(null);
+                            }}
                         />
                     )}
                 </main>
@@ -1714,10 +1804,88 @@
     }
 
     // =========================================================================
+    // DIALOG MODAL (replaces native alert/confirm/prompt)
+    // =========================================================================
+    
+    function DialogModal({ type, title, message, defaultValue, confirmText, cancelText, onConfirm, onCancel }) {
+        const [inputValue, setInputValue] = React.useState(defaultValue || '');
+        const inputRef = React.useRef(null);
+        
+        React.useEffect(() => {
+            if (type === 'prompt' && inputRef.current) {
+                inputRef.current.focus();
+                inputRef.current.select();
+            }
+        }, [type]);
+        
+        const handleKeyDown = (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                onConfirm(type === 'prompt' ? inputValue : true);
+            } else if (e.key === 'Escape') {
+                onCancel();
+            }
+        };
+        
+        // Determine icon and colors based on message content
+        const isError = message?.toLowerCase().includes('error') || message?.toLowerCase().includes('failed');
+        const isWarning = message?.toLowerCase().includes('warning') || message?.toLowerCase().includes('⚠');
+        const isSuccess = message?.toLowerCase().includes('✓') || message?.toLowerCase().includes('success');
+        
+        const borderColor = isError ? 'border-red-700' : isWarning ? 'border-amber-700' : isSuccess ? 'border-green-700' : 'border-slate-600';
+        const iconColor = isError ? 'text-red-400' : isWarning ? 'text-amber-400' : isSuccess ? 'text-green-400' : 'text-indigo-400';
+        
+        return (
+            <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-[100] p-4" onKeyDown={handleKeyDown}>
+                <div className={`bg-slate-800 rounded-xl border ${borderColor} p-6 max-w-md w-full fade-in shadow-2xl`}>
+                    {title && (
+                        <h2 className={`text-lg font-bold mb-3 flex items-center gap-2 ${iconColor}`}>
+                            {isError ? <Icons.AlertTriangle /> : isWarning ? '⚠️' : isSuccess ? '✓' : 'ℹ️'}
+                            {title}
+                        </h2>
+                    )}
+                    
+                    <div className="text-slate-300 mb-4 whitespace-pre-wrap">{message}</div>
+                    
+                    {type === 'prompt' && (
+                        <input
+                            ref={inputRef}
+                            type="text"
+                            value={inputValue}
+                            onChange={(e) => setInputValue(e.target.value)}
+                            className="w-full p-3 bg-slate-900 border border-slate-600 rounded-lg mb-4 text-white focus:border-indigo-500 focus:outline-none"
+                            placeholder="Enter value..."
+                        />
+                    )}
+                    
+                    <div className="flex gap-3">
+                        {type !== 'alert' && (
+                            <button 
+                                onClick={onCancel} 
+                                className="flex-1 p-2.5 bg-slate-700 hover:bg-slate-600 rounded-lg transition-colors">
+                                {cancelText || 'Cancel'}
+                            </button>
+                        )}
+                        <button 
+                            onClick={() => onConfirm(type === 'prompt' ? inputValue : true)} 
+                            className={`flex-1 p-2.5 rounded-lg transition-colors ${
+                                isError ? 'bg-red-600 hover:bg-red-500' :
+                                isWarning ? 'bg-amber-600 hover:bg-amber-500' :
+                                'bg-indigo-600 hover:bg-indigo-500'
+                            }`}>
+                            {confirmText || 'OK'}
+                        </button>
+                    </div>
+                </div>
+            </div>
+        );
+    }
+
+    // =========================================================================
     // DASHBOARD VIEW
     // =========================================================================
     
-    function DashboardView({ apps, stagedFiles, github, onFileDrop, onRemove, onDeploy, onBatchDeploy, onPromote, activeDeployment, setActiveDeployment, refreshing, onUpdateStagedFile, deployingRepos }) {
+    function DashboardView({ apps, stagedFiles, github, onFileDrop, onRemove, onDeploy, onBatchDeploy, onPromote, activeDeployment, setActiveDeployment, refreshing, onUpdateStagedFile, deployingRepos, showConfirm, showAlert, showPrompt }) {
         const [selectedFileIds, setSelectedFileIds] = React.useState(new Set());
         const [deployTarget, setDeployTarget] = React.useState({ appId: 'management', target: 'test' });
         const configuredApps = Object.values(apps).filter(a => a.testRepo || a.prodRepo);
@@ -1786,7 +1954,10 @@
             if (!github || !repo) return;
             
             if (!silent) {
-                const confirmed = confirm(`Force rebuild ${target.toUpperCase()} site?\n\nThis creates an empty commit to trigger GitHub Pages deployment.`);
+                const confirmed = await showConfirm(
+                    `This creates an empty commit to trigger GitHub Pages deployment.\n\nThe site should update in 30-90 seconds.`,
+                    `Force Rebuild ${target.toUpperCase()}?`
+                );
                 if (!confirmed) return;
             }
             
@@ -1817,7 +1988,10 @@
                 });
                 
                 if (!silent) {
-                    alert(`✓ Rebuild triggered for ${target.toUpperCase()}!\n\nGitHub Pages should update in 30-90 seconds.`);
+                    await showAlert(
+                        `GitHub Pages should update in 30-90 seconds.`,
+                        `✓ Rebuild Triggered for ${target.toUpperCase()}`
+                    );
                 }
                 
                 // Refresh app info
@@ -1831,7 +2005,7 @@
                 
             } catch (e) {
                 if (!silent) {
-                    alert(`Error triggering rebuild: ${e.message}`);
+                    await showAlert(`Error: ${e.message}`, 'Rebuild Failed');
                 }
                 return false;
             }
@@ -1986,9 +2160,16 @@
                                                                     🔴 Version Issues Detected
                                                                 </div>
                                                                 <button 
-                                                                    onClick={(e) => {
+                                                                    onClick={async (e) => {
                                                                         e.stopPropagation();
-                                                                        const targetVersion = f.version || prompt('Enter target version (e.g., 1.0.0):');
+                                                                        let targetVersion = f.version;
+                                                                        if (!targetVersion) {
+                                                                            targetVersion = await showPrompt(
+                                                                                'What version should all version strings be set to?',
+                                                                                '1.0.0',
+                                                                                'Enter Target Version'
+                                                                            );
+                                                                        }
                                                                         if (targetVersion) {
                                                                             const fixedContent = fixVersionsInContent(f.content, targetVersion);
                                                                             const newValidation = validateVersions(fixedContent, f.name);
@@ -2316,13 +2497,19 @@
                                                             {(app.testRepo || app.prodRepo) && (
                                                                 <button 
                                                                     onClick={async () => {
-                                                                        const confirmed = confirm(`Force rebuild ALL environments for ${app.name}?\n\nThis will trigger GitHub Pages rebuild for both TEST and PROD.`);
+                                                                        const confirmed = await showConfirm(
+                                                                            `This will trigger GitHub Pages rebuild for both TEST and PROD environments.`,
+                                                                            `Rebuild All for ${app.name}?`
+                                                                        );
                                                                         if (!confirmed) return;
                                                                         
                                                                         if (app.testRepo) await forceRebuild(app.testRepo, 'test', true);
                                                                         if (app.prodRepo) await forceRebuild(app.prodRepo, 'prod', true);
                                                                         
-                                                                        alert(`✓ Rebuild triggered for all ${app.name} environments!`);
+                                                                        await showAlert(
+                                                                            `GitHub Pages should update in 30-90 seconds.`,
+                                                                            `✓ Rebuild Triggered for ${app.name}`
+                                                                        );
                                                                     }}
                                                                     className="px-2 py-1 bg-indigo-600 hover:bg-indigo-500 text-xs rounded flex items-center gap-1">
                                                                     🔄 Rebuild All
@@ -3131,6 +3318,457 @@
                         ))}
                     </div>
                 )}
+            </div>
+        );
+    }
+
+    // =========================================================================
+    // SESSION LOG VIEW
+    // =========================================================================
+    
+    function SessionLogView({ apps, sessionLog, setSessionLog, deployments, github, onFileDrop }) {
+        const [newEntry, setNewEntry] = React.useState('');
+        const [firebaseUser, setFirebaseUser] = React.useState(null);
+        const [syncStatus, setSyncStatus] = React.useState('local');
+        const [quickDeployCode, setQuickDeployCode] = React.useState('');
+        const [detectedFile, setDetectedFile] = React.useState(null);
+        const [projectFile, setProjectFile] = React.useState(null); // { name, size, lastModified, downloadUrl }
+        const [uploading, setUploading] = React.useState(false);
+        const [downloading, setDownloading] = React.useState(false);
+        
+        const configuredApps = Object.values(apps).filter(a => a.testRepo || a.prodRepo);
+        
+        // Listen for Firebase auth
+        React.useEffect(() => {
+            if (!firebaseAuth) return;
+            const unsubscribe = firebaseAuth.onAuthStateChanged((u) => {
+                setFirebaseUser(u);
+                if (u) {
+                    loadProjectFileInfo(u.uid);
+                }
+            });
+            return () => unsubscribe();
+        }, []);
+        
+        // Load project file info from Firebase
+        const loadProjectFileInfo = async (uid) => {
+            if (!firebaseDb || !uid) return;
+            try {
+                const snapshot = await firebaseDb.ref(`command-center/${uid}/projectFile`).once('value');
+                const data = snapshot.val();
+                if (data) {
+                    setProjectFile(data);
+                }
+                setSyncStatus('synced');
+            } catch (e) {
+                console.error('Error loading project file info:', e);
+                setSyncStatus('error');
+            }
+        };
+        
+        // Upload gs-active.zip to Firebase (stored as base64)
+        const uploadProjectFile = async (file) => {
+            if (!firebaseDb || !firebaseUser) {
+                alert('Please sign in via the Firebase tab first');
+                return;
+            }
+            
+            setUploading(true);
+            try {
+                const reader = new FileReader();
+                reader.onload = async (e) => {
+                    const base64 = e.target.result.split(',')[1]; // Remove data:... prefix
+                    
+                    const fileInfo = {
+                        name: file.name,
+                        size: file.size,
+                        lastModified: new Date().toISOString(),
+                        data: base64
+                    };
+                    
+                    await firebaseDb.ref(`command-center/${firebaseUser.uid}/projectFile`).set(fileInfo);
+                    
+                    setProjectFile({
+                        name: file.name,
+                        size: file.size,
+                        lastModified: fileInfo.lastModified
+                    });
+                    
+                    // Log the upload
+                    await logEntry(`Uploaded ${file.name} (${(file.size/1024).toFixed(1)}KB)`, 'upload');
+                    
+                    setUploading(false);
+                };
+                reader.readAsDataURL(file);
+            } catch (e) {
+                console.error('Upload error:', e);
+                alert('Upload failed: ' + e.message);
+                setUploading(false);
+            }
+        };
+        
+        // Download gs-active.zip from Firebase
+        const downloadProjectFile = async () => {
+            if (!firebaseDb || !firebaseUser) {
+                alert('Please sign in via the Firebase tab first');
+                return;
+            }
+            
+            setDownloading(true);
+            try {
+                const snapshot = await firebaseDb.ref(`command-center/${firebaseUser.uid}/projectFile`).once('value');
+                const data = snapshot.val();
+                
+                if (!data || !data.data) {
+                    alert('No project file found. Upload one first!');
+                    setDownloading(false);
+                    return;
+                }
+                
+                // Convert base64 to blob and download
+                const byteCharacters = atob(data.data);
+                const byteNumbers = new Array(byteCharacters.length);
+                for (let i = 0; i < byteCharacters.length; i++) {
+                    byteNumbers[i] = byteCharacters.charCodeAt(i);
+                }
+                const byteArray = new Uint8Array(byteNumbers);
+                const blob = new Blob([byteArray], { type: 'application/zip' });
+                
+                // Create download link
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = data.name || 'gs-active.zip';
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+                
+                // Log the download
+                await logEntry(`Downloaded ${data.name}`, 'download');
+                
+                setDownloading(false);
+            } catch (e) {
+                console.error('Download error:', e);
+                alert('Download failed: ' + e.message);
+                setDownloading(false);
+            }
+        };
+        
+        // Handle file drop for project upload
+        const handleProjectFileDrop = (e) => {
+            e.preventDefault();
+            const file = e.dataTransfer?.files[0] || e.target.files?.[0];
+            if (file && (file.name.endsWith('.zip') || file.name === 'gs-active.zip')) {
+                uploadProjectFile(file);
+            } else {
+                alert('Please upload a .zip file (gs-active.zip)');
+            }
+        };
+        
+        // Log entry to Firebase
+        const logEntry = async (text, type = 'note') => {
+            if (!firebaseDb || !firebaseUser) return;
+            
+            const entry = {
+                time: new Date().toISOString(),
+                type,
+                text
+            };
+            
+            // Get or create today's session
+            const today = new Date().toISOString().split('T')[0];
+            await firebaseDb.ref(`command-center/${firebaseUser.uid}/logs/${today}`).push(entry);
+        };
+        
+        // Add manual entry
+        const addEntry = async () => {
+            if (!newEntry.trim()) return;
+            await logEntry(newEntry.trim());
+            setNewEntry('');
+            
+            // Update local display
+            setSessionLog(prev => ({
+                ...prev,
+                recentEntries: [...(prev.recentEntries || []), {
+                    time: new Date().toISOString(),
+                    type: 'note',
+                    text: newEntry.trim()
+                }].slice(-20)
+            }));
+        };
+        
+        // Quick Deploy: Detect file from pasted code
+        const handleCodePaste = (code) => {
+            setQuickDeployCode(code);
+            
+            if (!code.trim()) {
+                setDetectedFile(null);
+                return;
+            }
+            
+            const versionMatch = code.match(/<meta\s+name=["']version["']\s+content=["']([^"']+)["']/i);
+            const titleMatch = code.match(/<title>([^<]+)<\/title>/i);
+            
+            const version = versionMatch?.[1] || 'unknown';
+            const title = titleMatch?.[1]?.toLowerCase() || '';
+            
+            let matchedApp = null;
+            for (const app of configuredApps) {
+                const name = app.name.toLowerCase();
+                if (title.includes(name) || code.toLowerCase().includes(`${name} v`)) {
+                    matchedApp = app;
+                    break;
+                }
+            }
+            
+            setDetectedFile({
+                content: code,
+                version,
+                detectedApp: matchedApp,
+                title: titleMatch?.[1] || 'Unknown',
+                size: code.length
+            });
+        };
+        
+        // Quick Deploy
+        const handleQuickDeploy = async (appId, target) => {
+            if (!detectedFile || !github) return;
+            
+            const file = {
+                id: Date.now(),
+                name: 'index.html',
+                content: detectedFile.content,
+                version: detectedFile.version,
+                targetPath: 'index.html'
+            };
+            
+            onFileDrop([file]);
+            await logEntry(`Quick deploy: ${apps[appId]?.name} v${detectedFile.version} → ${target.toUpperCase()}`, 'deploy');
+            
+            setQuickDeployCode('');
+            setDetectedFile(null);
+        };
+        
+        // Generate context for Claude
+        const generateContext = () => {
+            const lines = [
+                `# Session Context - ${new Date().toLocaleString()}`,
+                ``,
+                `## App Versions`,
+                `| App | TEST | PROD |`,
+                `|-----|------|------|`,
+            ];
+            configuredApps.forEach(app => {
+                lines.push(`| ${app.name} | ${app.currentTestVersion || '—'} | ${app.currentProdVersion || '—'} |`);
+            });
+            return lines.join('\n');
+        };
+        
+        const copyContext = async () => {
+            await navigator.clipboard.writeText(generateContext());
+        };
+        
+        return (
+            <div className="space-y-6">
+                {/* Project File (gs-active.zip) */}
+                <div className="bg-indigo-900/30 border border-indigo-700 rounded-xl p-6">
+                    <h2 className="text-lg font-semibold mb-4 flex items-center gap-2 text-indigo-300">
+                        📦 Project File (gs-active.zip)
+                    </h2>
+                    
+                    {!firebaseUser ? (
+                        <div className="text-amber-400 text-sm p-3 bg-amber-900/30 rounded-lg">
+                            ⚠️ Sign in via the Firebase tab to sync your project file
+                        </div>
+                    ) : (
+                        <div className="space-y-4">
+                            {/* Current file info */}
+                            {projectFile ? (
+                                <div className="p-4 bg-slate-800 rounded-lg flex items-center justify-between">
+                                    <div>
+                                        <div className="font-medium">{projectFile.name}</div>
+                                        <div className="text-sm text-slate-400">
+                                            {(projectFile.size / 1024).toFixed(1)} KB • 
+                                            Last updated: {new Date(projectFile.lastModified).toLocaleString()}
+                                        </div>
+                                    </div>
+                                    <button
+                                        onClick={downloadProjectFile}
+                                        disabled={downloading}
+                                        className="px-4 py-2 bg-green-600 hover:bg-green-500 rounded-lg flex items-center gap-2 disabled:opacity-50">
+                                        {downloading ? '⏳' : '⬇️'} Download for Claude
+                                    </button>
+                                </div>
+                            ) : (
+                                <div className="p-4 bg-slate-800 rounded-lg text-slate-400 text-center">
+                                    No project file uploaded yet
+                                </div>
+                            )}
+                            
+                            {/* Upload zone */}
+                            <div
+                                onDrop={handleProjectFileDrop}
+                                onDragOver={e => e.preventDefault()}
+                                className="border-2 border-dashed border-slate-600 rounded-lg p-6 text-center hover:border-indigo-500 transition-colors">
+                                <input
+                                    type="file"
+                                    accept=".zip"
+                                    onChange={handleProjectFileDrop}
+                                    className="hidden"
+                                    id="project-file-input"
+                                />
+                                <label htmlFor="project-file-input" className="cursor-pointer">
+                                    {uploading ? (
+                                        <span className="text-indigo-400">⏳ Uploading...</span>
+                                    ) : (
+                                        <>
+                                            <span className="text-2xl">📤</span>
+                                            <div className="mt-2 text-slate-400">
+                                                Drop gs-active.zip here or <span className="text-indigo-400 underline">browse</span>
+                                            </div>
+                                            <div className="text-xs text-slate-500 mt-1">
+                                                Upload after each Claude session to keep in sync
+                                            </div>
+                                        </>
+                                    )}
+                                </label>
+                            </div>
+                            
+                            {/* Workflow instructions */}
+                            <div className="text-sm text-slate-400 bg-slate-800/50 rounded-lg p-4">
+                                <div className="font-medium text-slate-300 mb-2">📋 Session Workflow:</div>
+                                <ol className="list-decimal list-inside space-y-1">
+                                    <li><strong>Start:</strong> Download gs-active.zip → Upload to Claude</li>
+                                    <li><strong>Work:</strong> Make changes, use Quick Deploy</li>
+                                    <li><strong>End:</strong> Download updated zip from Claude → Upload here</li>
+                                </ol>
+                            </div>
+                        </div>
+                    )}
+                </div>
+                
+                {/* Quick Deploy */}
+                <div className="bg-slate-800 rounded-xl border border-slate-700 p-6">
+                    <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
+                        ⚡ Quick Deploy (Paste Code)
+                    </h2>
+                    <textarea
+                        value={quickDeployCode}
+                        onChange={e => handleCodePaste(e.target.value)}
+                        placeholder="Paste HTML code from Claude here..."
+                        className="w-full h-24 p-3 bg-slate-900 border border-slate-600 rounded-lg text-sm font-mono mb-3"
+                    />
+                    
+                    {detectedFile && (
+                        <div className="p-4 bg-slate-700/50 rounded-lg space-y-3">
+                            <div className="flex items-center justify-between">
+                                <div>
+                                    <div className="font-medium">{detectedFile.title}</div>
+                                    <div className="text-sm text-slate-400">
+                                        v{detectedFile.version} • {(detectedFile.size / 1024).toFixed(1)}KB
+                                    </div>
+                                </div>
+                                {detectedFile.detectedApp ? (
+                                    <span className="px-2 py-1 bg-green-900/50 text-green-400 rounded text-sm">
+                                        ✓ {detectedFile.detectedApp.name}
+                                    </span>
+                                ) : (
+                                    <span className="px-2 py-1 bg-amber-900/50 text-amber-400 rounded text-sm">
+                                        ? Select app
+                                    </span>
+                                )}
+                            </div>
+                            
+                            <div className="flex flex-wrap gap-2">
+                                {configuredApps.map(app => (
+                                    <button
+                                        key={app.id}
+                                        onClick={() => handleQuickDeploy(app.id, 'test')}
+                                        className={`px-3 py-1.5 rounded text-sm ${
+                                            detectedFile.detectedApp?.id === app.id 
+                                                ? 'bg-blue-600 hover:bg-blue-500' 
+                                                : 'bg-slate-600 hover:bg-slate-500'
+                                        }`}>
+                                        {app.icon} {app.name} → TEST
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
+                    )}
+                </div>
+                
+                {/* Activity Log */}
+                <div className="bg-slate-800 rounded-xl border border-slate-700 p-6">
+                    <div className="flex items-center justify-between mb-4">
+                        <h2 className="text-lg font-semibold">📋 Activity Log</h2>
+                        <button onClick={copyContext} className="px-3 py-1 bg-indigo-600 hover:bg-indigo-500 rounded text-sm">
+                            📋 Copy Context
+                        </button>
+                    </div>
+                    
+                    <div className="flex gap-2 mb-4">
+                        <input
+                            value={newEntry}
+                            onChange={e => setNewEntry(e.target.value)}
+                            onKeyDown={e => e.key === 'Enter' && addEntry()}
+                            placeholder="Log a note..."
+                            className="flex-1 p-2 bg-slate-900 border border-slate-600 rounded text-sm"
+                        />
+                        <button onClick={addEntry} className="px-4 bg-indigo-600 hover:bg-indigo-500 rounded">
+                            + Log
+                        </button>
+                    </div>
+                    
+                    {sessionLog.recentEntries?.length > 0 && (
+                        <div className="space-y-1 max-h-32 overflow-y-auto">
+                            {[...sessionLog.recentEntries].reverse().map((e, i) => (
+                                <div key={i} className="text-sm flex items-center gap-2">
+                                    <span className="text-xs text-slate-500 w-16">
+                                        {new Date(e.time).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
+                                    </span>
+                                    <span className={
+                                        e.type === 'deploy' ? 'text-green-400' : 
+                                        e.type === 'upload' ? 'text-blue-400' : 
+                                        e.type === 'download' ? 'text-purple-400' : ''
+                                    }>
+                                        {e.text}
+                                    </span>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </div>
+                
+                {/* Current Versions */}
+                <div className="bg-slate-800 rounded-xl border border-slate-700 p-6">
+                    <h2 className="text-lg font-semibold mb-4">📊 Current Versions</h2>
+                    <table className="w-full text-sm">
+                        <thead>
+                            <tr className="border-b border-slate-700">
+                                <th className="text-left p-2">App</th>
+                                <th className="text-center p-2">TEST</th>
+                                <th className="text-center p-2">PROD</th>
+                                <th className="text-center p-2">Sync</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {configuredApps.map(app => (
+                                <tr key={app.id} className="border-b border-slate-700/50">
+                                    <td className="p-2">{app.icon} {app.name}</td>
+                                    <td className="p-2 text-center font-mono text-blue-400">{app.currentTestVersion || '—'}</td>
+                                    <td className="p-2 text-center font-mono text-green-400">{app.currentProdVersion || '—'}</td>
+                                    <td className="p-2 text-center">
+                                        {app.currentTestVersion === app.currentProdVersion 
+                                            ? <span className="text-green-400">✓</span>
+                                            : <span className="text-amber-400">⚠️</span>
+                                        }
+                                    </td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                </div>
             </div>
         );
     }
