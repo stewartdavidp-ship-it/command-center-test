@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Management Test v1.0.1</title>
+    <title>Management Test v1.0.0</title>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
@@ -28,7 +28,7 @@
         h1 { font-size: 2rem; margin-bottom: 10px; }
         .version {
             display: inline-block;
-            background: #f59e0b;
+            background: #22c55e;
             color: white;
             padding: 4px 12px;
             border-radius: 20px;
@@ -36,16 +36,6 @@
             font-weight: 600;
             margin-bottom: 20px;
         }
-        .changelog {
-            background: rgba(245, 158, 11, 0.2);
-            border: 1px solid rgba(245, 158, 11, 0.5);
-            padding: 15px;
-            border-radius: 10px;
-            margin: 20px 0;
-            text-align: left;
-        }
-        .changelog h3 { margin-bottom: 10px; color: #fbbf24; }
-        .changelog li { margin-left: 20px; margin-bottom: 5px; }
         .info {
             background: rgba(0,0,0,0.3);
             padding: 20px;
@@ -75,22 +65,13 @@
     <div class="container">
         <div class="icon">🔧</div>
         <h1>Management Test</h1>
-        <div class="version">v1.0.1</div>
-        <p>Updated test page - testing promote flow!</p>
-        
-        <div class="changelog">
-            <h3>📋 What's New in v1.0.1</h3>
-            <ul>
-                <li>Changed version badge color to orange</li>
-                <li>Added this changelog section</li>
-                <li>Testing the promote workflow</li>
-            </ul>
-        </div>
+        <div class="version">v1.0.0</div>
+        <p>This is a test page deployed via Command Center</p>
         
         <div class="info">
             <div class="info-row">
                 <span class="label">Version</span>
-                <span class="value">1.0.1</span>
+                <span class="value">1.0.0</span>
             </div>
             <div class="info-row">
                 <span class="label">Deployed</span>
@@ -103,12 +84,15 @@
         </div>
         
         <div class="success">
-            ✅ v1.0.1 deployed successfully!
+            ✅ If you see this, deployment worked!
         </div>
     </div>
     
     <script>
+        // Show deployment timestamp
         document.getElementById('timestamp').textContent = new Date().toLocaleString();
+        
+        // Detect environment from URL
         const host = window.location.hostname;
         const env = host.includes('test') ? 'TEST' : 'PROD';
         document.getElementById('env').textContent = env;
