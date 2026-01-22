@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Game Shelf Command Center</title>
-    <meta name="version" content="6.7.1">
+    <meta name="version" content="6.7.2">
     <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
@@ -25,7 +25,7 @@
     <div id="root"><div style="display:flex;align-items:center;justify-content:center;min-height:100vh;"><div style="text-align:center;"><div style="font-size:48px;margin-bottom:20px;">🎮</div>Loading...</div></div></div>
 
     <script type="text/babel">
-    console.log('Command Center v6.7.1 starting...');
+    console.log('Command Center v6.7.2 starting...');
     
     // =========================================================================
     // FIREBASE CONFIG
@@ -103,33 +103,48 @@
         // Meta tag versions
         const metaMatches = content.matchAll(/<meta\s+[^>]*name=["']version["'][^>]*content=["']([^"']+)["'][^>]*>/gi);
         for (const m of metaMatches) {
+            // Skip if the content contains template literal syntax
+            if (m[1].includes('${') || m[1].includes('targetVersion')) continue;
             versions.push({ source: 'meta tag', value: m[1], line: content.substring(0, m.index).split('\n').length });
         }
         // Also check reverse order: content before name
         const metaMatches2 = content.matchAll(/<meta\s+[^>]*content=["']([^"']+)["'][^>]*name=["']version["'][^>]*>/gi);
         for (const m of metaMatches2) {
+            if (m[1].includes('${') || m[1].includes('targetVersion')) continue;
             versions.push({ source: 'meta tag', value: m[1], line: content.substring(0, m.index).split('\n').length });
         }
         
-        // JS variable versions - but NOT inside comments or the integration module definition
+        // JS variable versions - but NOT inside comments, template literals, or the integration module definition
         const jsMatches = content.matchAll(/^\s*const\s+(VERSION|APP_VERSION|GAME_VERSION)\s*=\s*['"]([^'"]+)['"]/gm);
         for (const m of jsMatches) {
             // Skip if it's inside the GameShelf integration module (those are module versions, not app versions)
             const before = content.substring(Math.max(0, m.index - 200), m.index);
             if (!before.includes('GAMESHELF_VERSION') && !before.includes('Integration Module')) {
+                // Skip template literals and code examples
+                if (m[2].includes('${') || m[2].includes('targetVersion')) continue;
                 versions.push({ source: `JS: ${m[1]}`, value: m[2], line: content.substring(0, m.index).split('\n').length });
             }
         }
         
         // Footer versions - look for patterns like "v1.0.0 •" or ">v1.0.0<"
+        // But skip anything in code comments or template literals
         const footerMatches = content.matchAll(/[>\s]v(\d+\.\d+\.\d+)\s*[•<·]/g);
         for (const m of footerMatches) {
+            // Check if this is inside a comment or code example
+            const lineStart = content.lastIndexOf('\n', m.index) + 1;
+            const lineContent = content.substring(lineStart, m.index);
+            // Skip if line starts with // or * (comment) or contains Pattern or Example
+            if (/^\s*(\/\/|\*|#)/.test(lineContent) || /Pattern|Example|e\.g\.|like/i.test(lineContent)) continue;
             versions.push({ source: 'footer/visible', value: m[1], line: content.substring(0, m.index).split('\n').length });
         }
         
         // Version in about/info sections
         const aboutMatches = content.matchAll(/Version:?\s*<\/?\w*>?\s*v?(\d+\.\d+\.\d+)/gi);
         for (const m of aboutMatches) {
+            // Skip code comments
+            const lineStart = content.lastIndexOf('\n', m.index) + 1;
+            const lineContent = content.substring(lineStart, m.index);
+            if (/^\s*(\/\/|\*|#)/.test(lineContent) || /Pattern|Example/i.test(lineContent)) continue;
             versions.push({ source: 'about/info text', value: m[1], line: content.substring(0, m.index).split('\n').length });
         }
         
@@ -195,7 +210,7 @@
             );
         }
         
-        // Fix const VERSION = '6.7.1' (but not GAMESHELF_VERSION)
+        // Fix const VERSION = 'x.x.x' (but not GAMESHELF_VERSION)
         fixed = fixed.replace(
             /(const\s+VERSION\s*=\s*['"])[^'"]*(['"])/g,
             `$1${targetVersion}$2`
@@ -1570,7 +1585,7 @@
                             <span className="text-2xl">🎮</span>
                             <div>
                                 <h1 className="text-lg font-bold">Command Center</h1>
-                                <div className="text-xs text-slate-400">v6.7.1 • Full Issue Integration</div>
+                                <div className="text-xs text-slate-400">v6.7.2 • Version Detection Fix</div>
                             </div>
                         </div>
                         <div className="flex items-center gap-2">
