@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Game Shelf Command Center</title>
-    <meta name="version" content="7.2.0">
+    <meta name="version" content="7.2.2">
     <meta name="gs-app-id" content="management">
     <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
@@ -27,7 +27,7 @@
     <div id="root"><div style="display:flex;align-items:center;justify-content:center;min-height:100vh;"><div style="text-align:center;"><div style="margin-bottom:20px;"><svg viewBox="0 0 100 100" width="64" height="64" xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="gsLoadGrad" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" style="stop-color:#667eea"/><stop offset="100%" style="stop-color:#764ba2"/></linearGradient></defs><rect x="5" y="5" width="90" height="90" rx="20" fill="url(#gsLoadGrad)"/><g transform="rotate(-12, 35, 50)"><rect x="15" y="28" width="28" height="36" rx="4" fill="white"/><circle cx="43" cy="46" r="6" fill="white"/><text x="29" y="54" font-family="Arial" font-size="20" font-weight="bold" fill="#667eea" text-anchor="middle">G</text></g><g transform="rotate(12, 65, 50)"><rect x="57" y="28" width="28" height="36" rx="4" fill="rgba(255,255,255,0.9)"/><circle cx="57" cy="46" r="6" fill="url(#gsLoadGrad)"/><text x="71" y="54" font-family="Arial" font-size="20" font-weight="bold" fill="#764ba2" text-anchor="middle">S</text></g></svg></div>Loading...</div></div></div>
 
     <script type="text/babel">
-    console.log('Command Center v7.2.0 starting...');
+    console.log('Command Center v7.2.2 starting...');
     
     // =========================================================================
     // FIREBASE CONFIG
@@ -2514,7 +2514,7 @@
                             <Icons.GameShelfLogo size={32} />
                             <div>
                                 <h1 className="text-lg font-bold">Command Center</h1>
-                                <div className="text-xs text-slate-400">v7.2.0 • Download package excludes backup files</div>
+                                <div className="text-xs text-slate-400">v7.2.2 • Handles large files (>1MB) in archive</div>
                             </div>
                         </div>
                         <div className="flex items-center gap-2">
@@ -3918,34 +3918,48 @@
             try {
                 // Get app info for naming
                 const app = configuredApps.find(a => a.testRepo === selectedRepo || a.prodRepo === selectedRepo);
-                const isTest = app?.testRepo === selectedRepo;
+                const repoName = selectedRepo.split('/')[1];
                 
-                // Files/patterns to EXCLUDE from deploy packages (backup/rollback files)
-                const excludePatterns = [
-                    /^old\d*\.html$/i,           // old1.html, old2.html, etc.
-                    /^old\d*\.index\.html$/i,    // old1.index.html, etc.
-                    /^backup/i,                   // backup* files
-                    /^\.git/,                     // .git files
-                    /^\.DS_Store$/,               // macOS files
-                    /^Thumbs\.db$/,               // Windows files
+                // WHITELIST: Only include files that belong in deploy packages
+                // Based on gs-active skill deploy structure
+                const deployFiles = [
+                    'index.html',
+                    'sw.js',
+                    'manifest.json',
+                    'RELEASE_NOTES.txt'  // Optional but include if present
                 ];
                 
-                const shouldExclude = (filename) => {
-                    return excludePatterns.some(pattern => pattern.test(filename));
+                // Valid icon files for deploy packages
+                const validIcons = [
+                    'icon-72.png', 'icon-96.png', 'icon-128.png', 'icon-144.png',
+                    'icon-152.png', 'icon-192.png', 'icon-384.png', 'icon-512.png',
+                    'icon-maskable-192.png', 'icon-maskable-512.png',
+                    'icon-source.svg', 'apple-touch-icon.png'
+                ];
+                
+                // Check if a file should be included in deploy package
+                const shouldInclude = (path) => {
+                    const filename = path.split('/').pop();
+                    // Root level deploy files
+                    if (deployFiles.includes(filename) && !path.includes('/')) return true;
+                    // Icons folder files
+                    if (path.startsWith('icons/') && validIcons.includes(filename)) return true;
+                    return false;
                 };
                 
-                // Recursively fetch all files from repo
+                // Fetch repo contents
                 const fetchAllFiles = async (path = '') => {
                     const contents = await github.listRepoContents(selectedRepo, path);
                     let files = [];
                     
                     for (const item of contents) {
                         if (item.type === 'file') {
-                            // Filter out backup/old files
-                            if (!shouldExclude(item.name)) {
+                            // Only include whitelisted deploy files
+                            if (shouldInclude(item.path)) {
                                 files.push(item);
                             }
-                        } else if (item.type === 'dir') {
+                        } else if (item.type === 'dir' && item.name === 'icons') {
+                            // Only recurse into icons folder
                             const subFiles = await fetchAllFiles(item.path);
                             files = files.concat(subFiles);
                         }
@@ -3970,23 +3984,29 @@
                     }
                 }
                 
-                // Create zip
+                // Determine folder name for zip structure: {app}-latest/
+                // Strip 'test' suffix if present to get base app name
+                let appName = repoName.replace(/test$/i, '');
+                const folderName = `${appName}-latest`;
+                
+                // Create zip with proper structure: {app}-latest/{files}
                 const zip = new JSZip();
+                const folder = zip.folder(folderName);
                 
                 for (const file of allFiles) {
                     try {
                         const response = await fetch(file.download_url);
                         const blob = await response.blob();
-                        zip.file(file.path, blob);
+                        // Add to folder with same relative path
+                        folder.file(file.path, blob);
                     } catch (e) {
                         console.warn(`Failed to fetch ${file.path}:`, e);
                     }
                 }
                 
                 // Generate zip and download
-                const repoName = selectedRepo.split('/')[1];
                 const versionStr = version.replace(/\./g, '_');
-                const filename = `${repoName}-deploy-v${versionStr}.zip`;
+                const filename = `${appName}-deploy-v${versionStr}.zip`;
                 
                 const content = await zip.generateAsync({ type: 'blob' });
                 const url = URL.createObjectURL(content);
@@ -3999,6 +4019,12 @@
                 URL.revokeObjectURL(url);
                 
                 setDownloadingPackage(false);
+                
+                // Show what was included
+                const includedFiles = allFiles.map(f => f.path).join(', ');
+                console.log(`Deploy package created: ${filename}`);
+                console.log(`Included files: ${includedFiles}`);
+                
             } catch (err) {
                 console.error('Deploy package download failed:', err);
                 showAlert('Deploy package download failed: ' + err.message, 'Download Error');
@@ -7198,7 +7224,20 @@ const pushIssueToCommandCenter = async (testResult) => {
                 for (const [path, zipEntry] of Object.entries(zip.files)) {
                     if (zipEntry.dir) continue;
                     
-                    const content = await zipEntry.async('string');
+                    // Detect if file is binary
+                    const isBinary = /\.(png|jpg|jpeg|gif|ico|woff|woff2|ttf|eot|svg)$/i.test(path);
+                    
+                    let content;
+                    let base64Content = null;
+                    
+                    if (isBinary) {
+                        // Read binary files as base64
+                        base64Content = await zipEntry.async('base64');
+                        content = `[Binary file: ${path}]`; // Placeholder for display
+                    } else {
+                        content = await zipEntry.async('string');
+                    }
+                    
                     const relativePath = path.replace(/^gs-active\//, '');
                     
                     // Extract version from HTML files
@@ -7216,8 +7255,10 @@ const pushIssueToCommandCenter = async (testResult) => {
                         fullPath: path,
                         appFolder,
                         content,
+                        base64Content,
+                        isBinary,
                         version,
-                        size: content.length,
+                        size: isBinary ? (base64Content?.length || 0) : content.length,
                         isHtml: path.endsWith('.html'),
                         isMarkdown: path.endsWith('.md'),
                         isJson: path.endsWith('.json'),
@@ -7336,7 +7377,7 @@ const pushIssueToCommandCenter = async (testResult) => {
             if (!github || archiveFiles.length === 0) return;
             
             const confirmed = await showConfirm(
-                `Push ${archiveFiles.length} files to gs-active repo?\\n\\n` +
+                `Push ${archiveFiles.length} files to gs-active repo?\n\n` +
                 `This will update the archive in GitHub.`,
                 'Push to gs-active'
             );
@@ -7369,13 +7410,30 @@ const pushIssueToCommandCenter = async (testResult) => {
                         if (existing) sha = existing.sha;
                     } catch (e) { /* File doesn't exist yet */ }
                     
-                    await github.createOrUpdateFile(
-                        GS_ACTIVE_REPO,
-                        file.path,
-                        file.content,
-                        `Update ${file.path} - ${new Date().toISOString().split('T')[0]}`,
-                        sha
-                    );
+                    // Handle binary vs text files differently
+                    if (file.isBinary && file.base64Content) {
+                        // Binary file - use base64 content directly
+                        const [owner, repoName] = GS_ACTIVE_REPO.split('/');
+                        const body = {
+                            message: `Update ${file.path} - ${new Date().toISOString().split('T')[0]}`,
+                            content: file.base64Content,
+                            committer: { name: 'Command Center', email: 'deploy@gameshelf.app' }
+                        };
+                        if (sha) body.sha = sha;
+                        await github.request(`/repos/${owner}/${repoName}/contents/${file.path}`, { 
+                            method: 'PUT', 
+                            body: JSON.stringify(body) 
+                        });
+                    } else {
+                        // Text file - use normal method
+                        await github.createOrUpdateFile(
+                            GS_ACTIVE_REPO,
+                            file.path,
+                            file.content,
+                            `Update ${file.path} - ${new Date().toISOString().split('T')[0]}`,
+                            sha
+                        );
+                    }
                 }
                 
                 setUploadProgress('');
@@ -7389,9 +7447,9 @@ const pushIssueToCommandCenter = async (testResult) => {
             }
         };
         
-        // Load files from gs-active repo
+        // Load files from gs-active repo - returns the files array
         const loadFromRepo = async () => {
-            if (!github) return;
+            if (!github) return [];
             
             setRepoLoading(true);
             
@@ -7424,6 +7482,7 @@ const pushIssueToCommandCenter = async (testResult) => {
                 }
                 
                 setRepoFiles(files);
+                return files;
                 
             } catch (err) {
                 console.error('Error loading repo:', err);
@@ -7432,6 +7491,7 @@ const pushIssueToCommandCenter = async (testResult) => {
                 } else {
                     await showAlert(`Error: ${err.message}`, 'Load Failed');
                 }
+                return [];
             } finally {
                 setRepoLoading(false);
             }
@@ -7442,18 +7502,21 @@ const pushIssueToCommandCenter = async (testResult) => {
             if (!github) return;
             
             setLoading(true);
-            setUploadProgress('Fetching files from repository...');
+            setUploadProgress('Fetching file list from repository...');
             
             try {
                 const zip = new JSZip();
                 const gsActive = zip.folder('gs-active');
                 
-                // Get all files
-                if (!repoFiles) {
-                    await loadFromRepo();
+                // Always fetch fresh file list
+                const filesToFetch = await loadFromRepo();
+                
+                if (filesToFetch.length === 0) {
+                    await showAlert('No files found in gs-active repository.', 'Empty Repository');
+                    setLoading(false);
+                    return;
                 }
                 
-                const filesToFetch = repoFiles || [];
                 let fetched = 0;
                 
                 for (const file of filesToFetch) {
@@ -7463,13 +7526,31 @@ const pushIssueToCommandCenter = async (testResult) => {
                         const fileData = await github.getFile(GS_ACTIVE_REPO, file.path);
                         if (fileData) {
                             // Determine if binary or text
-                            const isBinary = file.path.match(/\.(png|jpg|jpeg|gif|ico|woff|woff2|ttf|eot)$/i);
+                            const isBinary = file.path.match(/\.(png|jpg|jpeg|gif|ico|woff|woff2|ttf|eot|svg)$/i);
                             
-                            if (isBinary) {
-                                gsActive.file(file.path, fileData.content, { base64: true });
+                            // Check if content is available (GitHub Contents API has 1MB limit)
+                            // For files >1MB, content will be empty but download_url is provided
+                            if (!fileData.content && fileData.download_url) {
+                                console.log(`Large file detected (>1MB): ${file.path}, using download_url`);
+                                const response = await fetch(fileData.download_url);
+                                if (isBinary) {
+                                    const blob = await response.blob();
+                                    gsActive.file(file.path, blob);
+                                } else {
+                                    const text = await response.text();
+                                    gsActive.file(file.path, text);
+                                }
+                            } else if (fileData.content) {
+                                if (isBinary) {
+                                    // Binary files - content is already base64
+                                    gsActive.file(file.path, fileData.content.replace(/[\r\n\s]/g, ''), { base64: true });
+                                } else {
+                                    // Text files - decode from base64
+                                    const content = decodeURIComponent(escape(atob(fileData.content.replace(/[\r\n\s]/g, ''))));
+                                    gsActive.file(file.path, content);
+                                }
                             } else {
-                                const content = decodeURIComponent(escape(atob(fileData.content.replace(/[\r\n\s]/g, ''))));
-                                gsActive.file(file.path, content);
+                                console.warn(`No content or download_url for ${file.path}`);
                             }
                         }
                     } catch (e) {
@@ -7490,6 +7571,7 @@ const pushIssueToCommandCenter = async (testResult) => {
                 URL.revokeObjectURL(url);
                 
                 setUploadProgress('');
+                await showAlert(`Downloaded ${filesToFetch.length} files!`, '✅ Download Complete');
                 
             } catch (err) {
                 console.error('Error downloading:', err);
@@ -7507,88 +7589,117 @@ const pushIssueToCommandCenter = async (testResult) => {
             try {
                 const deployedVersions = await getDeployedVersions();
                 const today = new Date().toISOString().split('T')[0];
+                const dayOfWeek = new Date().toLocaleDateString('en-US', { weekday: 'long' });
                 
-                let briefing = `# Claude Session Briefing - ${today}\n\n`;
-                briefing += `Generated by Command Center v7.2.0\n\n`;
+                let briefing = `# Claude Session Briefing - ${dayOfWeek}, ${today}\n\n`;
+                briefing += `Generated by Command Center v7.2.2\n\n`;
                 briefing += `---\n\n`;
                 
                 // Deployed Versions
-                briefing += `## Deployed Versions\n\n`;
-                briefing += `| App | TEST | PROD |\n`;
-                briefing += `|-----|------|------|\n`;
+                briefing += `## 📊 Deployed Versions\n\n`;
+                briefing += `| App | TEST | PROD | Status |\n`;
+                briefing += `|-----|------|------|--------|\n`;
                 
+                let hasVersions = false;
                 for (const [appId, app] of Object.entries(apps)) {
                     if (!app.testRepo && !app.prodRepo) continue;
+                    hasVersions = true;
                     const v = deployedVersions[appId] || {};
-                    briefing += `| ${app.name} | ${v.test || '—'} | ${v.prod || '—'} |\n`;
+                    const status = v.test === v.prod ? '✓ Synced' : (v.test && v.prod ? '⚠️ Differ' : '—');
+                    briefing += `| ${app.name} | ${v.test || '—'} | ${v.prod || '—'} | ${status} |\n`;
+                }
+                
+                if (!hasVersions) {
+                    briefing += `| (No configured apps) | — | — | — |\n`;
                 }
                 
                 briefing += `\n`;
                 
                 // Open Issues
                 const openIssues = globalIssues?.filter(i => i.status === 'open' || i.status === 'in-progress') || [];
+                briefing += `## 🐛 Open Issues (${openIssues.length})\n\n`;
                 if (openIssues.length > 0) {
-                    briefing += `## Open Issues (${openIssues.length})\n\n`;
                     for (const issue of openIssues.slice(0, 10)) {
-                        briefing += `- **${issue.id}**: ${issue.title} (${issue.app || 'General'}) - ${issue.priority || 'normal'}\n`;
+                        const priorityIcon = issue.priority === 'high' ? '🔴' : issue.priority === 'low' ? '🟢' : '🟡';
+                        briefing += `- ${priorityIcon} **${issue.id}**: ${issue.title} (${issue.app || 'General'})\n`;
                     }
                     if (openIssues.length > 10) {
                         briefing += `- _...and ${openIssues.length - 10} more_\n`;
                     }
-                    briefing += `\n`;
+                } else {
+                    briefing += `_No open issues - great job!_\n`;
                 }
+                briefing += `\n`;
                 
                 // Recent Deployments
                 const recentDeploys = deployments?.filter(d => d.status === 'success').slice(0, 5) || [];
+                briefing += `## 🚀 Recent Deployments\n\n`;
                 if (recentDeploys.length > 0) {
-                    briefing += `## Recent Deployments\n\n`;
                     for (const d of recentDeploys) {
                         const time = d.startedAt ? new Date(d.startedAt).toLocaleString() : 'Unknown';
-                        briefing += `- **${d.appName}** v${d.version || '?'} → ${d.target?.toUpperCase() || '?'} (${time})\n`;
+                        const targetIcon = d.target === 'prod' ? '🟢' : '🔵';
+                        briefing += `- ${targetIcon} **${d.appName}** v${d.version || '?'} → ${d.target?.toUpperCase() || '?'} (${time})\n`;
                     }
-                    briefing += `\n`;
+                } else {
+                    briefing += `_No recent deployments_\n`;
                 }
+                briefing += `\n`;
                 
-                // Session Notes
-                if (sessionLog?.notes) {
-                    briefing += `## Session Notes\n\n`;
+                // Session Notes (if any)
+                if (sessionLog?.notes && sessionLog.notes.trim()) {
+                    briefing += `## 📝 Session Notes\n\n`;
                     briefing += sessionLog.notes + `\n\n`;
                 }
                 
                 // Current Session Log
                 if (sessionLog?.currentSession) {
-                    briefing += `## Current Session\n\n`;
+                    briefing += `## 🎯 Current Session\n\n`;
                     briefing += `**Goal:** ${sessionLog.currentSession.goal || 'Not specified'}\n\n`;
                     if (sessionLog.currentSession.completed?.length > 0) {
                         briefing += `**Completed:**\n`;
                         for (const item of sessionLog.currentSession.completed) {
-                            briefing += `- ${item}\n`;
+                            briefing += `- ✅ ${item}\n`;
                         }
                         briefing += `\n`;
                     }
                     if (sessionLog.currentSession.pending?.length > 0) {
                         briefing += `**Pending:**\n`;
                         for (const item of sessionLog.currentSession.pending) {
-                            briefing += `- ${item}\n`;
+                            briefing += `- ⏳ ${item}\n`;
                         }
                         briefing += `\n`;
                     }
                 }
                 
+                // Include archive info if we have it
+                if (archiveContext) {
+                    briefing += `## 📦 Archive CONTEXT.md (Summary)\n\n`;
+                    // Extract just the first section or key info
+                    const contextLines = archiveContext.split('\n').slice(0, 30);
+                    briefing += contextLines.join('\n') + '\n\n';
+                    if (archiveContext.split('\n').length > 30) {
+                        briefing += `_[Truncated - see full CONTEXT.md in gs-active]_\n\n`;
+                    }
+                }
+                
                 // GitHub URLs
-                briefing += `## Quick Links\n\n`;
-                briefing += `| App | TEST URL | PROD URL |\n`;
-                briefing += `|-----|----------|----------|\n`;
+                briefing += `## 🔗 Quick Links\n\n`;
+                briefing += `| App | TEST | PROD |\n`;
+                briefing += `|-----|------|------|\n`;
                 
                 for (const [appId, app] of Object.entries(apps)) {
                     if (!app.testRepo && !app.prodRepo) continue;
-                    const testUrl = app.testRepo ? `https://${app.testRepo.split('/')[0]}.github.io/${app.testRepo.split('/')[1]}/` : '—';
-                    const prodUrl = app.prodRepo ? `https://${app.prodRepo.split('/')[0]}.github.io/${app.prodRepo.split('/')[1]}/` : '—';
+                    const testUrl = app.testRepo ? `[Link](https://${app.testRepo.split('/')[0]}.github.io/${app.testRepo.split('/')[1]}/)` : '—';
+                    const prodUrl = app.prodRepo ? `[Link](https://${app.prodRepo.split('/')[0]}.github.io/${app.prodRepo.split('/')[1]}/)` : '—';
                     briefing += `| ${app.name} | ${testUrl} | ${prodUrl} |\n`;
                 }
                 
                 briefing += `\n---\n\n`;
-                briefing += `_To start working, download gs-active.zip from the Archive tab and upload to Claude._\n`;
+                briefing += `## 🚀 Getting Started\n\n`;
+                briefing += `1. Download **gs-active.zip** from the Archive → Download tab\n`;
+                briefing += `2. Upload the zip to Claude\n`;
+                briefing += `3. Say: "Please review skills and the gs-active file"\n\n`;
+                briefing += `_Or paste this briefing for a quick overview without the full archive._\n`;
                 
                 setBriefingText(briefing);
                 setUploadProgress('');
@@ -7753,12 +7864,14 @@ const pushIssueToCommandCenter = async (testResult) => {
                                 <div className="max-h-64 overflow-y-auto space-y-1 text-sm font-mono">
                                     {archiveFiles.map((f, i) => (
                                         <div key={i} className="flex items-center gap-2 py-1 px-2 hover:bg-slate-700 rounded">
-                                            {f.isHtml && <span className="text-orange-400">📄</span>}
-                                            {f.isJs && <span className="text-yellow-400">📜</span>}
-                                            {f.isJson && <span className="text-green-400">📋</span>}
-                                            {f.isMarkdown && <span className="text-blue-400">📝</span>}
-                                            {!f.isHtml && !f.isJs && !f.isJson && !f.isMarkdown && <span>📁</span>}
+                                            {f.isBinary && <span className="text-purple-400">🖼️</span>}
+                                            {!f.isBinary && f.isHtml && <span className="text-orange-400">📄</span>}
+                                            {!f.isBinary && f.isJs && <span className="text-yellow-400">📜</span>}
+                                            {!f.isBinary && f.isJson && <span className="text-green-400">📋</span>}
+                                            {!f.isBinary && f.isMarkdown && <span className="text-blue-400">📝</span>}
+                                            {!f.isBinary && !f.isHtml && !f.isJs && !f.isJson && !f.isMarkdown && <span>📁</span>}
                                             <span className="text-slate-300">{f.path}</span>
+                                            {f.isBinary && <span className="text-purple-400 text-xs">(binary)</span>}
                                             {f.version && <span className="text-indigo-400 ml-auto">v{f.version}</span>}
                                             <span className="text-slate-500 text-xs">{(f.size / 1024).toFixed(1)}KB</span>
                                         </div>
