@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Game Shelf Command Center</title>
-    <meta name="version" content="7.1.9">
+    <meta name="version" content="7.2.0">
     <meta name="gs-app-id" content="management">
     <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
@@ -27,7 +27,7 @@
     <div id="root"><div style="display:flex;align-items:center;justify-content:center;min-height:100vh;"><div style="text-align:center;"><div style="margin-bottom:20px;"><svg viewBox="0 0 100 100" width="64" height="64" xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="gsLoadGrad" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" style="stop-color:#667eea"/><stop offset="100%" style="stop-color:#764ba2"/></linearGradient></defs><rect x="5" y="5" width="90" height="90" rx="20" fill="url(#gsLoadGrad)"/><g transform="rotate(-12, 35, 50)"><rect x="15" y="28" width="28" height="36" rx="4" fill="white"/><circle cx="43" cy="46" r="6" fill="white"/><text x="29" y="54" font-family="Arial" font-size="20" font-weight="bold" fill="#667eea" text-anchor="middle">G</text></g><g transform="rotate(12, 65, 50)"><rect x="57" y="28" width="28" height="36" rx="4" fill="rgba(255,255,255,0.9)"/><circle cx="57" cy="46" r="6" fill="url(#gsLoadGrad)"/><text x="71" y="54" font-family="Arial" font-size="20" font-weight="bold" fill="#764ba2" text-anchor="middle">S</text></g></svg></div>Loading...</div></div></div>
 
     <script type="text/babel">
-    console.log('Command Center v7.1.9 starting...');
+    console.log('Command Center v7.2.0 starting...');
     
     // =========================================================================
     // FIREBASE CONFIG
@@ -2514,7 +2514,7 @@
                             <Icons.GameShelfLogo size={32} />
                             <div>
                                 <h1 className="text-lg font-bold">Command Center</h1>
-                                <div className="text-xs text-slate-400">v7.1.9 • Repo cleanup for stale files</div>
+                                <div className="text-xs text-slate-400">v7.2.0 • Download package excludes backup files</div>
                             </div>
                         </div>
                         <div className="flex items-center gap-2">
@@ -2523,10 +2523,11 @@
                                 title="Refresh versions">
                                 <Icons.Refresh />
                             </button>
-                            {['dashboard', 'files', 'firebase', 'session', 'issues', 'apps', 'history', 'config', 'settings'].map(v => (
+                            {['dashboard', 'archive', 'files', 'firebase', 'session', 'issues', 'apps', 'history', 'config', 'settings'].map(v => (
                                 <button key={v} onClick={() => setView(v)}
                                     className={`px-3 py-1.5 rounded text-sm capitalize flex items-center gap-1 ${view === v ? 'bg-indigo-600' : 'text-slate-400 hover:text-white'}`}>
                                     {v === 'settings' && <Icons.Settings />}
+                                    {v === 'archive' && <><Icons.Archive /> Archive</>}
                                     {v === 'config' && <><Icons.GitBranch /> Config</>}
                                     {v === 'files' && <><Icons.Folder /> Files</>}
                                     {v === 'firebase' && <><Icons.Database /> Firebase</>}
@@ -2567,6 +2568,20 @@
                             setView={setView}
                             rollbackSnapshots={rollbackSnapshots}
                             onQuickRollback={quickRollback}
+                        />
+                    )}
+                    
+                    {view === 'archive' && (
+                        <ArchiveView
+                            apps={apps}
+                            config={config}
+                            github={github}
+                            showAlert={showAlert}
+                            showConfirm={showConfirm}
+                            showPrompt={showPrompt}
+                            globalIssues={globalIssues}
+                            sessionLog={sessionLog}
+                            deployments={deployments}
                         />
                     )}
                     
@@ -2949,16 +2964,13 @@
             }
         }, [stagedFiles.length]); // Only when file count changes (new file added)
         
-        // Reset deploying state when activeDeployment completes, track completion
+        // Reset deploying state when activeDeployment starts, track completion
         React.useEffect(() => {
             if (activeDeployment) {
-                // Only reset isDeploying when deployment actually finishes (success or error)
-                if (activeDeployment.status === 'success' || activeDeployment.status === 'error') {
-                    setIsDeploying(false);
-                    // Mark as completed when deploy succeeds
-                    if (activeDeployment.status === 'success') {
-                        setDeployCompleted(true);
-                    }
+                setIsDeploying(false);
+                // Mark as completed when deploy succeeds
+                if (activeDeployment.status === 'success') {
+                    setDeployCompleted(true);
                 }
             }
         }, [activeDeployment, activeDeployment?.status]);
@@ -3989,139 +4001,6 @@
             }
         };
         
-        // ============ REPO CLEANUP ============
-        // Identifies and removes files not part of the deployment package
-        const [cleanupModal, setCleanupModal] = React.useState(null);
-        const [cleanupDeleting, setCleanupDeleting] = React.useState(false);
-        
-        // Files that SHOULD be in a deployment
-        const DEPLOYMENT_FILES = [
-            'index.html',
-            'sw.js',
-            'manifest.json',
-            'manifest-test.json',   // Game Shelf test builds
-            'RELEASE_NOTES.txt',
-        ];
-        
-        // Folders that SHOULD be in a deployment
-        const DEPLOYMENT_FOLDERS = [
-            'icons',
-            'icons-test',           // Game Shelf test builds
-        ];
-        
-        // Patterns that are definitely stale/cleanup candidates
-        const STALE_PATTERNS = [
-            /^old\d*\.html$/i,           // old1.html, old2.html
-            /^old\d*\.index\.html$/i,    // old6.index.html
-            /^backup.*$/i,               // backup* files
-            /\.bak$/i,                   // .bak files
-            /^test.*\.html$/i,           // test*.html files (not in a test folder)
-            /^copy.*\.html$/i,           // copy*.html files
-            /^\._/,                      // macOS resource forks
-            /\.orig$/i,                  // .orig backup files
-        ];
-        
-        const isDeploymentFile = (path) => {
-            // Check if it's a known deployment file
-            if (DEPLOYMENT_FILES.includes(path)) return true;
-            
-            // Check if it's in a deployment folder
-            for (const folder of DEPLOYMENT_FOLDERS) {
-                if (path.startsWith(folder + '/')) return true;
-            }
-            
-            // Hidden files like .git are handled separately
-            if (path.startsWith('.')) return false;
-            
-            return false;
-        };
-        
-        const isDefinitelyStale = (filename) => {
-            return STALE_PATTERNS.some(pattern => pattern.test(filename));
-        };
-        
-        const scanForCleanup = async () => {
-            if (!selectedRepo || !github || !currentFiles.length) {
-                showAlert('Please select a repo and load its files first', 'No Files');
-                return;
-            }
-            
-            // Categorize files
-            const staleFiles = [];
-            const unknownFiles = [];
-            const deployFiles = [];
-            
-            for (const file of currentFiles) {
-                const path = file.path;
-                const filename = file.name;
-                
-                if (isDeploymentFile(path)) {
-                    deployFiles.push(file);
-                } else if (isDefinitelyStale(filename)) {
-                    staleFiles.push({ ...file, autoChecked: true });
-                } else if (!path.startsWith('.git')) {
-                    // Unknown file - not deployment, not obviously stale
-                    unknownFiles.push({ ...file, autoChecked: false });
-                }
-            }
-            
-            const candidates = [...staleFiles, ...unknownFiles];
-            
-            if (candidates.length === 0) {
-                showAlert('✓ Repository is clean! No stale files found.', 'All Clean');
-                return;
-            }
-            
-            setCleanupModal({
-                candidates,
-                selected: new Set(staleFiles.map(f => f.path)),
-                deployCount: deployFiles.length
-            });
-        };
-        
-        const toggleCleanupFile = (path) => {
-            setCleanupModal(prev => {
-                const newSelected = new Set(prev.selected);
-                if (newSelected.has(path)) {
-                    newSelected.delete(path);
-                } else {
-                    newSelected.add(path);
-                }
-                return { ...prev, selected: newSelected };
-            });
-        };
-        
-        const executeCleanup = async () => {
-            if (!cleanupModal?.selected?.size) return;
-            
-            setCleanupDeleting(true);
-            
-            const toDelete = cleanupModal.candidates.filter(f => cleanupModal.selected.has(f.path));
-            let deleted = 0;
-            let errors = [];
-            
-            for (const file of toDelete) {
-                try {
-                    await github.deleteFile(selectedRepo, file.path, file.sha, `Cleanup: Remove ${file.name}`);
-                    deleted++;
-                } catch (err) {
-                    errors.push(`${file.name}: ${err.message}`);
-                }
-            }
-            
-            setCleanupDeleting(false);
-            setCleanupModal(null);
-            
-            // Refresh file list
-            onLoadRepo(selectedRepo);
-            
-            if (errors.length > 0) {
-                showAlert(`Deleted ${deleted} files.\n\nErrors:\n${errors.join('\n')}`, 'Cleanup Partial');
-            } else {
-                showAlert(`✓ Successfully deleted ${deleted} files from ${selectedRepo}`, 'Cleanup Complete');
-            }
-        };
-        
         const handleVersionAudit = async () => {
             if (!github || !selectedRepo) return;
             setVersionAudit({ loading: true });
@@ -4193,10 +4072,6 @@
                                 ) : (
                                     <><Icons.Download /> Download Package</>
                                 )}
-                            </button>
-                            <button onClick={scanForCleanup}
-                                className="px-3 py-1.5 bg-rose-700 hover:bg-rose-600 rounded text-sm flex items-center gap-1">
-                                🧹 Cleanup
                             </button>
                         </div>
                     )}
@@ -4317,73 +4192,6 @@
                                     <Icons.File /> <span className="text-slate-500">{item.repo.split('/')[1]}/</span>{item.path}
                                 </div>
                             ))}
-                        </div>
-                    </div>
-                )}
-                
-                {/* Cleanup Modal */}
-                {cleanupModal && (
-                    <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
-                        <div className="bg-slate-800 rounded-xl border border-slate-600 max-w-lg w-full max-h-[80vh] flex flex-col">
-                            <div className="p-4 border-b border-slate-700 flex items-center justify-between">
-                                <h2 className="text-lg font-semibold flex items-center gap-2">
-                                    🧹 Cleanup {selectedRepo?.split('/')[1]}
-                                </h2>
-                                <button onClick={() => setCleanupModal(null)} className="text-slate-400 hover:text-white">
-                                    <Icons.X />
-                                </button>
-                            </div>
-                            
-                            <div className="p-4 overflow-y-auto flex-1">
-                                <p className="text-sm text-slate-400 mb-3">
-                                    Found {cleanupModal.candidates.length} files not in deployment package. 
-                                    <span className="text-green-400 ml-1">({cleanupModal.deployCount} deployment files OK)</span>
-                                </p>
-                                
-                                <div className="space-y-1">
-                                    {cleanupModal.candidates.map((file, i) => (
-                                        <label key={i} className={`flex items-center gap-3 p-2 rounded cursor-pointer hover:bg-slate-700/50 ${file.autoChecked ? 'bg-red-900/20' : ''}`}>
-                                            <input 
-                                                type="checkbox" 
-                                                checked={cleanupModal.selected.has(file.path)}
-                                                onChange={() => toggleCleanupFile(file.path)}
-                                                className="w-4 h-4 rounded"
-                                            />
-                                            <span className={`flex-1 text-sm ${file.autoChecked ? 'text-red-300' : 'text-slate-300'}`}>
-                                                {file.path}
-                                            </span>
-                                            <span className="text-xs text-slate-500">
-                                                {(file.size / 1024).toFixed(1)}KB
-                                            </span>
-                                            {file.autoChecked && (
-                                                <span className="text-xs bg-red-900 text-red-300 px-1.5 py-0.5 rounded">stale</span>
-                                            )}
-                                        </label>
-                                    ))}
-                                </div>
-                            </div>
-                            
-                            <div className="p-4 border-t border-slate-700 flex items-center justify-between">
-                                <div className="text-sm text-slate-400">
-                                    {cleanupModal.selected.size} of {cleanupModal.candidates.length} selected
-                                </div>
-                                <div className="flex gap-2">
-                                    <button onClick={() => setCleanupModal(null)} className="px-4 py-2 bg-slate-700 rounded">
-                                        Cancel
-                                    </button>
-                                    <button 
-                                        onClick={executeCleanup} 
-                                        disabled={cleanupModal.selected.size === 0 || cleanupDeleting}
-                                        className="px-4 py-2 bg-red-600 hover:bg-red-500 disabled:bg-red-900 disabled:cursor-not-allowed rounded flex items-center gap-2"
-                                    >
-                                        {cleanupDeleting ? (
-                                            <><div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" /> Deleting...</>
-                                        ) : (
-                                            <><Icons.Trash /> Delete {cleanupModal.selected.size} Files</>
-                                        )}
-                                    </button>
-                                </div>
-                            </div>
                         </div>
                     </div>
                 )}
@@ -7308,6 +7116,764 @@ const pushIssueToCommandCenter = async (testResult) => {
                             {isNew ? 'Add App' : 'Save Changes'}
                         </button>
                     </div>
+                </div>
+            </div>
+        );
+    }
+
+    // =========================================================================
+    // ARCHIVE VIEW - gs-active Management for Claude Sessions
+    // =========================================================================
+    
+    // gs-active repo configuration
+    const GS_ACTIVE_REPO = 'stewartdavidp-ship-it/gs-active';
+    const GS_ACTIVE_APPS = ['gameshelf', 'quotle', 'rungs', 'slate', 'wordboxing', 'command-center', 'testplan', 'firebase-functions'];
+    
+    function ArchiveView({ apps, config, github, showAlert, showConfirm, showPrompt, globalIssues, sessionLog, deployments }) {
+        const [activeTab, setActiveTab] = React.useState('upload'); // 'upload', 'download', 'briefing'
+        const [archiveFiles, setArchiveFiles] = React.useState([]); // Parsed files from uploaded zip
+        const [archiveContext, setArchiveContext] = React.useState(null); // CONTEXT.md content
+        const [archiveStandards, setArchiveStandards] = React.useState(null); // STANDARDS.md content
+        const [validationResults, setValidationResults] = React.useState(null); // Version comparison results
+        const [loading, setLoading] = React.useState(false);
+        const [uploadProgress, setUploadProgress] = React.useState('');
+        const [repoFiles, setRepoFiles] = React.useState(null); // Files from gs-active repo
+        const [repoLoading, setRepoLoading] = React.useState(false);
+        const [briefingText, setBriefingText] = React.useState('');
+        
+        // Get deployed versions for all apps
+        const getDeployedVersions = async () => {
+            if (!github) return {};
+            const versions = {};
+            
+            for (const [appId, app] of Object.entries(apps)) {
+                versions[appId] = { test: null, prod: null };
+                
+                if (app.testRepo) {
+                    try {
+                        const file = await github.getFile(app.testRepo, 'index.html');
+                        if (file) {
+                            const content = decodeURIComponent(escape(atob(file.content.replace(/[\r\n\s]/g, ''))));
+                            versions[appId].test = extractVersionFromHTML(content);
+                        }
+                    } catch (e) { console.log(`Could not fetch ${appId} test version`); }
+                }
+                
+                if (app.prodRepo) {
+                    try {
+                        const file = await github.getFile(app.prodRepo, 'index.html');
+                        if (file) {
+                            const content = decodeURIComponent(escape(atob(file.content.replace(/[\r\n\s]/g, ''))));
+                            versions[appId].prod = extractVersionFromHTML(content);
+                        }
+                    } catch (e) { console.log(`Could not fetch ${appId} prod version`); }
+                }
+            }
+            
+            return versions;
+        };
+        
+        // Handle zip file upload
+        const handleZipUpload = async (e) => {
+            const file = e.target.files?.[0];
+            if (!file) return;
+            
+            setLoading(true);
+            setUploadProgress('Reading zip file...');
+            setArchiveFiles([]);
+            setValidationResults(null);
+            
+            try {
+                const zip = await JSZip.loadAsync(file);
+                const files = [];
+                
+                setUploadProgress('Extracting files...');
+                
+                // Extract all files
+                for (const [path, zipEntry] of Object.entries(zip.files)) {
+                    if (zipEntry.dir) continue;
+                    
+                    const content = await zipEntry.async('string');
+                    const relativePath = path.replace(/^gs-active\//, '');
+                    
+                    // Extract version from HTML files
+                    let version = null;
+                    if (path.endsWith('.html')) {
+                        version = extractVersionFromHTML(content);
+                    }
+                    
+                    // Detect app from path
+                    const pathParts = relativePath.split('/');
+                    const appFolder = pathParts[0];
+                    
+                    files.push({
+                        path: relativePath,
+                        fullPath: path,
+                        appFolder,
+                        content,
+                        version,
+                        size: content.length,
+                        isHtml: path.endsWith('.html'),
+                        isMarkdown: path.endsWith('.md'),
+                        isJson: path.endsWith('.json'),
+                        isJs: path.endsWith('.js')
+                    });
+                    
+                    // Capture special files
+                    if (relativePath === 'CONTEXT.md') {
+                        setArchiveContext(content);
+                    } else if (relativePath === 'STANDARDS.md') {
+                        setArchiveStandards(content);
+                    }
+                }
+                
+                setArchiveFiles(files);
+                setUploadProgress('Validating versions...');
+                
+                // Validate against deployed versions
+                const deployedVersions = await getDeployedVersions();
+                const validation = [];
+                
+                // Map app folders to app IDs
+                const folderToAppId = {
+                    'gameshelf': 'gameshelf',
+                    'quotle': 'quotle', 
+                    'rungs': 'rungs',
+                    'slate': 'slate',
+                    'wordboxing': 'wordboxing',
+                    'command-center': 'management',
+                    'testplan': 'testplan'
+                };
+                
+                // Check each app folder
+                const appFolders = [...new Set(files.map(f => f.appFolder))];
+                
+                for (const folder of appFolders) {
+                    const appId = folderToAppId[folder];
+                    const indexFile = files.find(f => f.appFolder === folder && f.path.endsWith('index.html'));
+                    
+                    if (!indexFile || !appId) continue;
+                    
+                    const archiveVersion = indexFile.version;
+                    const deployed = deployedVersions[appId] || {};
+                    
+                    let status = 'unknown';
+                    let message = '';
+                    
+                    if (!archiveVersion) {
+                        status = 'warning';
+                        message = 'No version found in archive';
+                    } else if (deployed.prod && archiveVersion === deployed.prod) {
+                        status = 'match';
+                        message = `v${archiveVersion} matches PROD`;
+                    } else if (deployed.test && archiveVersion === deployed.test) {
+                        status = 'match-test';
+                        message = `v${archiveVersion} matches TEST`;
+                    } else if (deployed.prod && archiveVersion !== deployed.prod) {
+                        status = 'mismatch';
+                        message = `Archive v${archiveVersion} ≠ PROD v${deployed.prod}`;
+                    } else if (!deployed.prod && !deployed.test) {
+                        status = 'no-deploy';
+                        message = `v${archiveVersion} (no deployed version found)`;
+                    } else {
+                        status = 'newer';
+                        message = `v${archiveVersion} (PROD: ${deployed.prod || 'none'}, TEST: ${deployed.test || 'none'})`;
+                    }
+                    
+                    validation.push({
+                        folder,
+                        appId,
+                        appName: apps[appId]?.name || folder,
+                        archiveVersion,
+                        deployedProd: deployed.prod,
+                        deployedTest: deployed.test,
+                        status,
+                        message
+                    });
+                }
+                
+                // Check for apps deployed but not in archive
+                for (const [appId, app] of Object.entries(apps)) {
+                    const folder = Object.entries(folderToAppId).find(([f, id]) => id === appId)?.[0];
+                    if (!folder) continue;
+                    
+                    const inArchive = validation.some(v => v.appId === appId);
+                    if (!inArchive && (app.testRepo || app.prodRepo)) {
+                        const deployed = deployedVersions[appId] || {};
+                        if (deployed.prod || deployed.test) {
+                            validation.push({
+                                folder,
+                                appId,
+                                appName: app.name,
+                                archiveVersion: null,
+                                deployedProd: deployed.prod,
+                                deployedTest: deployed.test,
+                                status: 'missing',
+                                message: `Not in archive (PROD: ${deployed.prod || 'none'})`
+                            });
+                        }
+                    }
+                }
+                
+                setValidationResults(validation);
+                setUploadProgress('');
+                
+            } catch (err) {
+                console.error('Error processing zip:', err);
+                await showAlert(`Error processing zip: ${err.message}`, 'Upload Error');
+            } finally {
+                setLoading(false);
+            }
+        };
+        
+        // Push archive to gs-active repo
+        const pushToRepo = async () => {
+            if (!github || archiveFiles.length === 0) return;
+            
+            const confirmed = await showConfirm(
+                `Push ${archiveFiles.length} files to gs-active repo?\\n\\n` +
+                `This will update the archive in GitHub.`,
+                'Push to gs-active'
+            );
+            
+            if (!confirmed) return;
+            
+            setLoading(true);
+            setUploadProgress('Checking repository...');
+            
+            try {
+                // Check if repo exists
+                const [owner, repoName] = GS_ACTIVE_REPO.split('/');
+                const exists = await github.repoExists(owner, repoName);
+                
+                if (!exists) {
+                    setUploadProgress('Creating gs-active repository...');
+                    await github.createRepo('gs-active', 'Game Shelf development archive for Claude sessions', false);
+                    await new Promise(r => setTimeout(r, 2000)); // Wait for repo creation
+                }
+                
+                // Push each file
+                let pushed = 0;
+                for (const file of archiveFiles) {
+                    setUploadProgress(`Pushing ${file.path} (${++pushed}/${archiveFiles.length})...`);
+                    
+                    // Get current file SHA if it exists
+                    let sha = null;
+                    try {
+                        const existing = await github.getFile(GS_ACTIVE_REPO, file.path);
+                        if (existing) sha = existing.sha;
+                    } catch (e) { /* File doesn't exist yet */ }
+                    
+                    await github.createOrUpdateFile(
+                        GS_ACTIVE_REPO,
+                        file.path,
+                        file.content,
+                        `Update ${file.path} - ${new Date().toISOString().split('T')[0]}`,
+                        sha
+                    );
+                }
+                
+                setUploadProgress('');
+                await showAlert(`Successfully pushed ${archiveFiles.length} files to gs-active!`, '✅ Archive Updated');
+                
+            } catch (err) {
+                console.error('Error pushing to repo:', err);
+                await showAlert(`Error: ${err.message}`, 'Push Failed');
+            } finally {
+                setLoading(false);
+            }
+        };
+        
+        // Load files from gs-active repo
+        const loadFromRepo = async () => {
+            if (!github) return;
+            
+            setRepoLoading(true);
+            
+            try {
+                const files = [];
+                
+                // Get root contents
+                const root = await github.listRepoContents(GS_ACTIVE_REPO);
+                
+                for (const item of root) {
+                    if (item.type === 'file') {
+                        files.push({ path: item.path, type: 'file', sha: item.sha, size: item.size });
+                    } else if (item.type === 'dir') {
+                        // Get directory contents
+                        const dirContents = await github.listRepoContents(GS_ACTIVE_REPO, item.path);
+                        for (const subItem of dirContents) {
+                            if (subItem.type === 'file') {
+                                files.push({ path: subItem.path, type: 'file', sha: subItem.sha, size: subItem.size, folder: item.path });
+                            } else if (subItem.type === 'dir') {
+                                // Go one more level (for icons folders, etc)
+                                const subDirContents = await github.listRepoContents(GS_ACTIVE_REPO, subItem.path);
+                                for (const deepItem of subDirContents) {
+                                    if (deepItem.type === 'file') {
+                                        files.push({ path: deepItem.path, type: 'file', sha: deepItem.sha, size: deepItem.size, folder: item.path });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                setRepoFiles(files);
+                
+            } catch (err) {
+                console.error('Error loading repo:', err);
+                if (err.message?.includes('Not Found')) {
+                    await showAlert('gs-active repo not found. Upload an archive first to create it.', 'Repository Not Found');
+                } else {
+                    await showAlert(`Error: ${err.message}`, 'Load Failed');
+                }
+            } finally {
+                setRepoLoading(false);
+            }
+        };
+        
+        // Download gs-active as zip
+        const downloadAsZip = async () => {
+            if (!github) return;
+            
+            setLoading(true);
+            setUploadProgress('Fetching files from repository...');
+            
+            try {
+                const zip = new JSZip();
+                const gsActive = zip.folder('gs-active');
+                
+                // Get all files
+                if (!repoFiles) {
+                    await loadFromRepo();
+                }
+                
+                const filesToFetch = repoFiles || [];
+                let fetched = 0;
+                
+                for (const file of filesToFetch) {
+                    setUploadProgress(`Downloading ${file.path} (${++fetched}/${filesToFetch.length})...`);
+                    
+                    try {
+                        const fileData = await github.getFile(GS_ACTIVE_REPO, file.path);
+                        if (fileData) {
+                            // Determine if binary or text
+                            const isBinary = file.path.match(/\.(png|jpg|jpeg|gif|ico|woff|woff2|ttf|eot)$/i);
+                            
+                            if (isBinary) {
+                                gsActive.file(file.path, fileData.content, { base64: true });
+                            } else {
+                                const content = decodeURIComponent(escape(atob(fileData.content.replace(/[\r\n\s]/g, ''))));
+                                gsActive.file(file.path, content);
+                            }
+                        }
+                    } catch (e) {
+                        console.error(`Error fetching ${file.path}:`, e);
+                    }
+                }
+                
+                setUploadProgress('Creating zip file...');
+                
+                const blob = await zip.generateAsync({ type: 'blob' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `gs-active-${new Date().toISOString().split('T')[0]}.zip`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+                
+                setUploadProgress('');
+                
+            } catch (err) {
+                console.error('Error downloading:', err);
+                await showAlert(`Error: ${err.message}`, 'Download Failed');
+            } finally {
+                setLoading(false);
+            }
+        };
+        
+        // Generate Claude briefing
+        const generateBriefing = async () => {
+            setLoading(true);
+            setUploadProgress('Generating briefing...');
+            
+            try {
+                const deployedVersions = await getDeployedVersions();
+                const today = new Date().toISOString().split('T')[0];
+                
+                let briefing = `# Claude Session Briefing - ${today}\n\n`;
+                briefing += `Generated by Command Center v7.2.0\n\n`;
+                briefing += `---\n\n`;
+                
+                // Deployed Versions
+                briefing += `## Deployed Versions\n\n`;
+                briefing += `| App | TEST | PROD |\n`;
+                briefing += `|-----|------|------|\n`;
+                
+                for (const [appId, app] of Object.entries(apps)) {
+                    if (!app.testRepo && !app.prodRepo) continue;
+                    const v = deployedVersions[appId] || {};
+                    briefing += `| ${app.name} | ${v.test || '—'} | ${v.prod || '—'} |\n`;
+                }
+                
+                briefing += `\n`;
+                
+                // Open Issues
+                const openIssues = globalIssues?.filter(i => i.status === 'open' || i.status === 'in-progress') || [];
+                if (openIssues.length > 0) {
+                    briefing += `## Open Issues (${openIssues.length})\n\n`;
+                    for (const issue of openIssues.slice(0, 10)) {
+                        briefing += `- **${issue.id}**: ${issue.title} (${issue.app || 'General'}) - ${issue.priority || 'normal'}\n`;
+                    }
+                    if (openIssues.length > 10) {
+                        briefing += `- _...and ${openIssues.length - 10} more_\n`;
+                    }
+                    briefing += `\n`;
+                }
+                
+                // Recent Deployments
+                const recentDeploys = deployments?.filter(d => d.status === 'success').slice(0, 5) || [];
+                if (recentDeploys.length > 0) {
+                    briefing += `## Recent Deployments\n\n`;
+                    for (const d of recentDeploys) {
+                        const time = d.startedAt ? new Date(d.startedAt).toLocaleString() : 'Unknown';
+                        briefing += `- **${d.appName}** v${d.version || '?'} → ${d.target?.toUpperCase() || '?'} (${time})\n`;
+                    }
+                    briefing += `\n`;
+                }
+                
+                // Session Notes
+                if (sessionLog?.notes) {
+                    briefing += `## Session Notes\n\n`;
+                    briefing += sessionLog.notes + `\n\n`;
+                }
+                
+                // Current Session Log
+                if (sessionLog?.currentSession) {
+                    briefing += `## Current Session\n\n`;
+                    briefing += `**Goal:** ${sessionLog.currentSession.goal || 'Not specified'}\n\n`;
+                    if (sessionLog.currentSession.completed?.length > 0) {
+                        briefing += `**Completed:**\n`;
+                        for (const item of sessionLog.currentSession.completed) {
+                            briefing += `- ${item}\n`;
+                        }
+                        briefing += `\n`;
+                    }
+                    if (sessionLog.currentSession.pending?.length > 0) {
+                        briefing += `**Pending:**\n`;
+                        for (const item of sessionLog.currentSession.pending) {
+                            briefing += `- ${item}\n`;
+                        }
+                        briefing += `\n`;
+                    }
+                }
+                
+                // GitHub URLs
+                briefing += `## Quick Links\n\n`;
+                briefing += `| App | TEST URL | PROD URL |\n`;
+                briefing += `|-----|----------|----------|\n`;
+                
+                for (const [appId, app] of Object.entries(apps)) {
+                    if (!app.testRepo && !app.prodRepo) continue;
+                    const testUrl = app.testRepo ? `https://${app.testRepo.split('/')[0]}.github.io/${app.testRepo.split('/')[1]}/` : '—';
+                    const prodUrl = app.prodRepo ? `https://${app.prodRepo.split('/')[0]}.github.io/${app.prodRepo.split('/')[1]}/` : '—';
+                    briefing += `| ${app.name} | ${testUrl} | ${prodUrl} |\n`;
+                }
+                
+                briefing += `\n---\n\n`;
+                briefing += `_To start working, download gs-active.zip from the Archive tab and upload to Claude._\n`;
+                
+                setBriefingText(briefing);
+                setUploadProgress('');
+                
+            } catch (err) {
+                console.error('Error generating briefing:', err);
+                await showAlert(`Error: ${err.message}`, 'Briefing Failed');
+            } finally {
+                setLoading(false);
+            }
+        };
+        
+        // Copy briefing to clipboard
+        const copyBriefing = async () => {
+            try {
+                await navigator.clipboard.writeText(briefingText);
+                await showAlert('Briefing copied to clipboard!', '✅ Copied');
+            } catch (err) {
+                await showAlert('Failed to copy to clipboard', 'Error');
+            }
+        };
+        
+        // Status badge component
+        const StatusBadge = ({ status }) => {
+            const styles = {
+                'match': 'bg-green-600 text-green-100',
+                'match-test': 'bg-blue-600 text-blue-100',
+                'mismatch': 'bg-red-600 text-red-100',
+                'newer': 'bg-amber-600 text-amber-100',
+                'missing': 'bg-red-800 text-red-200',
+                'warning': 'bg-amber-600 text-amber-100',
+                'no-deploy': 'bg-slate-600 text-slate-300',
+                'unknown': 'bg-slate-600 text-slate-300'
+            };
+            
+            const labels = {
+                'match': '✓ PROD Match',
+                'match-test': '✓ TEST Match',
+                'mismatch': '✗ Mismatch',
+                'newer': '↑ Newer',
+                'missing': '✗ Missing',
+                'warning': '⚠ Warning',
+                'no-deploy': '— Not Deployed',
+                'unknown': '? Unknown'
+            };
+            
+            return (
+                <span className={`px-2 py-0.5 rounded text-xs font-medium ${styles[status] || styles.unknown}`}>
+                    {labels[status] || status}
+                </span>
+            );
+        };
+        
+        return (
+            <div className="space-y-6">
+                <div className="flex items-center justify-between">
+                    <h2 className="text-xl font-bold flex items-center gap-2">
+                        📦 Archive Manager
+                    </h2>
+                    <div className="text-sm text-slate-400">
+                        gs-active repo: <span className="text-indigo-400">{GS_ACTIVE_REPO}</span>
+                    </div>
+                </div>
+                
+                {/* Tab Navigation */}
+                <div className="flex gap-2 border-b border-slate-700 pb-2">
+                    {[
+                        { id: 'upload', label: '⬆️ Upload Archive', icon: 'Upload' },
+                        { id: 'download', label: '⬇️ Download Archive', icon: 'Download' },
+                        { id: 'briefing', label: '📋 Claude Briefing', icon: 'File' }
+                    ].map(tab => (
+                        <button
+                            key={tab.id}
+                            onClick={() => setActiveTab(tab.id)}
+                            className={`px-4 py-2 rounded-t-lg font-medium transition-colors ${
+                                activeTab === tab.id 
+                                    ? 'bg-slate-700 text-white' 
+                                    : 'text-slate-400 hover:text-white hover:bg-slate-800'
+                            }`}
+                        >
+                            {tab.label}
+                        </button>
+                    ))}
+                </div>
+                
+                {/* Loading indicator */}
+                {loading && (
+                    <div className="p-4 bg-indigo-900/30 border border-indigo-700 rounded-lg flex items-center gap-3">
+                        <div className="animate-spin w-5 h-5 border-2 border-indigo-500 border-t-transparent rounded-full"></div>
+                        <span>{uploadProgress || 'Processing...'}</span>
+                    </div>
+                )}
+                
+                {/* Upload Tab */}
+                {activeTab === 'upload' && (
+                    <div className="space-y-6">
+                        {/* Upload Zone */}
+                        <div className="border-2 border-dashed border-slate-600 rounded-lg p-8 text-center hover:border-indigo-500 transition-colors">
+                            <input
+                                type="file"
+                                accept=".zip"
+                                onChange={handleZipUpload}
+                                className="hidden"
+                                id="archive-upload"
+                            />
+                            <label htmlFor="archive-upload" className="cursor-pointer">
+                                <Icons.Upload />
+                                <div className="mt-2 text-lg">Drop gs-active.zip here or click to upload</div>
+                                <div className="text-sm text-slate-400 mt-1">End of session: Upload to validate and push to GitHub</div>
+                            </label>
+                        </div>
+                        
+                        {/* Validation Results */}
+                        {validationResults && (
+                            <div className="bg-slate-800 rounded-lg p-4">
+                                <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
+                                    <Icons.Check /> Version Validation
+                                </h3>
+                                
+                                <div className="space-y-2">
+                                    {validationResults.map((v, i) => (
+                                        <div key={i} className="flex items-center justify-between p-3 bg-slate-900 rounded">
+                                            <div className="flex items-center gap-3">
+                                                <AppIcon icon={apps[v.appId]?.icon} size={20} />
+                                                <span className="font-medium">{v.appName}</span>
+                                                {v.archiveVersion && (
+                                                    <span className="text-sm text-slate-400">v{v.archiveVersion}</span>
+                                                )}
+                                            </div>
+                                            <div className="flex items-center gap-3">
+                                                <span className="text-sm text-slate-400">{v.message}</span>
+                                                <StatusBadge status={v.status} />
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                                
+                                {/* Summary */}
+                                <div className="mt-4 pt-4 border-t border-slate-700 flex justify-between items-center">
+                                    <div className="text-sm text-slate-400">
+                                        {archiveFiles.length} files in archive • 
+                                        {validationResults.filter(v => v.status === 'match' || v.status === 'match-test').length} matching • 
+                                        {validationResults.filter(v => v.status === 'mismatch' || v.status === 'missing').length} issues
+                                    </div>
+                                    
+                                    <button
+                                        onClick={pushToRepo}
+                                        disabled={loading || !github}
+                                        className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-700 disabled:text-slate-500 rounded font-medium flex items-center gap-2"
+                                    >
+                                        <Icons.Rocket /> Push to gs-active
+                                    </button>
+                                </div>
+                            </div>
+                        )}
+                        
+                        {/* Archive Contents */}
+                        {archiveFiles.length > 0 && (
+                            <div className="bg-slate-800 rounded-lg p-4">
+                                <h3 className="text-lg font-semibold mb-4">Archive Contents ({archiveFiles.length} files)</h3>
+                                
+                                <div className="max-h-64 overflow-y-auto space-y-1 text-sm font-mono">
+                                    {archiveFiles.map((f, i) => (
+                                        <div key={i} className="flex items-center gap-2 py-1 px-2 hover:bg-slate-700 rounded">
+                                            {f.isHtml && <span className="text-orange-400">📄</span>}
+                                            {f.isJs && <span className="text-yellow-400">📜</span>}
+                                            {f.isJson && <span className="text-green-400">📋</span>}
+                                            {f.isMarkdown && <span className="text-blue-400">📝</span>}
+                                            {!f.isHtml && !f.isJs && !f.isJson && !f.isMarkdown && <span>📁</span>}
+                                            <span className="text-slate-300">{f.path}</span>
+                                            {f.version && <span className="text-indigo-400 ml-auto">v{f.version}</span>}
+                                            <span className="text-slate-500 text-xs">{(f.size / 1024).toFixed(1)}KB</span>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+                        
+                        {/* CONTEXT.md Preview */}
+                        {archiveContext && (
+                            <div className="bg-slate-800 rounded-lg p-4">
+                                <h3 className="text-lg font-semibold mb-2">📄 CONTEXT.md</h3>
+                                <pre className="text-sm text-slate-300 whitespace-pre-wrap max-h-48 overflow-y-auto bg-slate-900 p-3 rounded">
+                                    {archiveContext.substring(0, 2000)}
+                                    {archiveContext.length > 2000 && '...\n(truncated)'}
+                                </pre>
+                            </div>
+                        )}
+                    </div>
+                )}
+                
+                {/* Download Tab */}
+                {activeTab === 'download' && (
+                    <div className="space-y-6">
+                        <div className="bg-slate-800 rounded-lg p-6">
+                            <h3 className="text-lg font-semibold mb-4">Download gs-active from GitHub</h3>
+                            <p className="text-slate-400 mb-4">
+                                Start of session: Download the latest archive to provide to Claude.
+                            </p>
+                            
+                            <div className="flex gap-3">
+                                <button
+                                    onClick={loadFromRepo}
+                                    disabled={repoLoading || !github}
+                                    className="px-4 py-2 bg-slate-700 hover:bg-slate-600 disabled:bg-slate-800 rounded flex items-center gap-2"
+                                >
+                                    <Icons.Refresh /> Refresh File List
+                                </button>
+                                
+                                <button
+                                    onClick={downloadAsZip}
+                                    disabled={loading || !github}
+                                    className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-700 rounded font-medium flex items-center gap-2"
+                                >
+                                    <Icons.Download /> Download gs-active.zip
+                                </button>
+                            </div>
+                        </div>
+                        
+                        {/* Repo file list */}
+                        {repoFiles && (
+                            <div className="bg-slate-800 rounded-lg p-4">
+                                <h3 className="text-lg font-semibold mb-4">Files in gs-active repo ({repoFiles.length})</h3>
+                                
+                                <div className="max-h-64 overflow-y-auto space-y-1 text-sm font-mono">
+                                    {repoFiles.map((f, i) => (
+                                        <div key={i} className="flex items-center gap-2 py-1 px-2 hover:bg-slate-700 rounded">
+                                            <Icons.File />
+                                            <span className="text-slate-300">{f.path}</span>
+                                            <span className="text-slate-500 text-xs ml-auto">{(f.size / 1024).toFixed(1)}KB</span>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+                        
+                        {repoFiles === null && !repoLoading && (
+                            <div className="text-center text-slate-400 py-8">
+                                Click "Refresh File List" to see available files
+                            </div>
+                        )}
+                    </div>
+                )}
+                
+                {/* Briefing Tab */}
+                {activeTab === 'briefing' && (
+                    <div className="space-y-6">
+                        <div className="bg-slate-800 rounded-lg p-6">
+                            <h3 className="text-lg font-semibold mb-4">Generate Claude Briefing</h3>
+                            <p className="text-slate-400 mb-4">
+                                Create a markdown summary of current project state for quick Claude onboarding.
+                            </p>
+                            
+                            <button
+                                onClick={generateBriefing}
+                                disabled={loading || !github}
+                                className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-700 rounded font-medium flex items-center gap-2"
+                            >
+                                <Icons.Zap /> Generate Briefing
+                            </button>
+                        </div>
+                        
+                        {briefingText && (
+                            <div className="bg-slate-800 rounded-lg p-4">
+                                <div className="flex justify-between items-center mb-4">
+                                    <h3 className="text-lg font-semibold">📋 Session Briefing</h3>
+                                    <button
+                                        onClick={copyBriefing}
+                                        className="px-3 py-1 bg-slate-700 hover:bg-slate-600 rounded text-sm flex items-center gap-1"
+                                    >
+                                        <Icons.Copy /> Copy
+                                    </button>
+                                </div>
+                                
+                                <pre className="text-sm text-slate-300 whitespace-pre-wrap max-h-96 overflow-y-auto bg-slate-900 p-4 rounded font-mono">
+                                    {briefingText}
+                                </pre>
+                            </div>
+                        )}
+                    </div>
+                )}
+                
+                {/* Help Text */}
+                <div className="bg-slate-800/50 rounded-lg p-4 text-sm text-slate-400">
+                    <h4 className="font-medium text-slate-300 mb-2">📖 Workflow</h4>
+                    <ul className="space-y-1 list-disc list-inside">
+                        <li><strong>End of Session:</strong> Upload gs-active.zip → Validate versions → Push to GitHub</li>
+                        <li><strong>Start of Session:</strong> Download gs-active.zip → Upload to Claude → Or copy briefing for quick start</li>
+                        <li>The gs-active repo serves as the single source of truth between Claude sessions</li>
+                    </ul>
                 </div>
             </div>
         );
