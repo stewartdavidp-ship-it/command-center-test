@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Game Shelf Command Center</title>
-    <meta name="version" content="7.2.6">
+    <meta name="version" content="7.3.0">
     <meta name="gs-app-id" content="management">
     <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
@@ -27,7 +27,7 @@
     <div id="root"><div style="display:flex;align-items:center;justify-content:center;min-height:100vh;"><div style="text-align:center;"><div style="margin-bottom:20px;"><svg viewBox="0 0 100 100" width="64" height="64" xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="gsLoadGrad" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" style="stop-color:#667eea"/><stop offset="100%" style="stop-color:#764ba2"/></linearGradient></defs><rect x="5" y="5" width="90" height="90" rx="20" fill="url(#gsLoadGrad)"/><g transform="rotate(-12, 35, 50)"><rect x="15" y="28" width="28" height="36" rx="4" fill="white"/><circle cx="43" cy="46" r="6" fill="white"/><text x="29" y="54" font-family="Arial" font-size="20" font-weight="bold" fill="#667eea" text-anchor="middle">G</text></g><g transform="rotate(12, 65, 50)"><rect x="57" y="28" width="28" height="36" rx="4" fill="rgba(255,255,255,0.9)"/><circle cx="57" cy="46" r="6" fill="url(#gsLoadGrad)"/><text x="71" y="54" font-family="Arial" font-size="20" font-weight="bold" fill="#764ba2" text-anchor="middle">S</text></g></svg></div>Loading...</div></div></div>
 
     <script type="text/babel">
-    console.log('Command Center v7.2.6 starting...');
+    console.log('Command Center v7.3.0 starting...');
     
     // =========================================================================
     // FIREBASE CONFIG
@@ -38,6 +38,12 @@
         authDomain: "word-boxing.firebaseapp.com",
         databaseURL: "https://word-boxing-default-rtdb.firebaseio.com",
         projectId: "word-boxing"
+    };
+    
+    // Custom domain mapping for repos
+    // Maps repo full names to their custom domains
+    const CUSTOM_DOMAINS = {
+        'stewartdavidp-ship-it/gameshelf': 'gameshelf.co'
     };
     
     // Initialize Firebase
@@ -297,6 +303,7 @@
         gameshelf: {
             id: 'gameshelf', name: 'Game Shelf', icon: 'gs-logo',
             targetPath: 'index.html', swPath: 'sw.js', hasServiceWorker: true,
+            subPath: '',  // Root of consolidated repo
             repos: { dev: '', test: '', prod: '', beta: '' },
             versions: { dev: '', test: '', prod: '', beta: '' },
             repoPatterns: {
@@ -310,6 +317,7 @@
         slate: {
             id: 'slate', name: 'Slate', icon: '🪨',
             targetPath: 'index.html', swPath: 'sw.js', hasServiceWorker: true,
+            subPath: 'slate',  // Subfolder in consolidated repo
             repos: { dev: '', test: '', prod: '', beta: '' },
             versions: { dev: '', test: '', prod: '', beta: '' },
             repoPatterns: {
@@ -323,6 +331,7 @@
         rungs: {
             id: 'rungs', name: 'Rungs', icon: '🪜',
             targetPath: 'index.html', swPath: 'sw.js', hasServiceWorker: true,
+            subPath: 'rungs',  // Subfolder in consolidated repo
             repos: { dev: '', test: '', prod: '', beta: '' },
             versions: { dev: '', test: '', prod: '', beta: '' },
             repoPatterns: {
@@ -336,6 +345,7 @@
         quotle: {
             id: 'quotle', name: 'Quotle', icon: '💬',
             targetPath: 'index.html', swPath: 'sw.js', hasServiceWorker: true,
+            subPath: 'quotle',  // Subfolder in consolidated repo
             repos: { dev: '', test: '', prod: '', beta: '' },
             versions: { dev: '', test: '', prod: '', beta: '' },
             repoPatterns: {
@@ -349,6 +359,7 @@
         wordboxing: {
             id: 'wordboxing', name: 'Word Boxing', icon: '🥊',
             targetPath: 'index.html', swPath: 'sw.js', hasServiceWorker: true,
+            subPath: 'wordboxing',  // Subfolder in consolidated repo
             repos: { dev: '', test: '', prod: '', beta: '' },
             versions: { dev: '', test: '', prod: '', beta: '' },
             repoPatterns: {
@@ -362,6 +373,7 @@
         testplan: {
             id: 'testplan', name: 'Test Plan', icon: '🧪',
             targetPath: 'index.html', swPath: '', hasServiceWorker: false,
+            subPath: '',  // Not in consolidated repo
             repos: { dev: '', test: '', prod: '', beta: '' },
             versions: { dev: '', test: '', prod: '', beta: '' },
             repoPatterns: {
@@ -375,6 +387,7 @@
         management: {
             id: 'management', name: 'Command Center', icon: '🎛️',
             targetPath: 'index.html', swPath: '', hasServiceWorker: false,
+            subPath: '',  // Not in consolidated repo
             repos: { dev: '', test: '', prod: '', beta: '' },
             versions: { dev: '', test: '', prod: '', beta: '' },
             repoPatterns: {
@@ -388,6 +401,7 @@
         edutrack: {
             id: 'edutrack', name: 'EduTrack', icon: '📚',
             targetPath: 'index.html', swPath: 'sw.js', hasServiceWorker: true,
+            subPath: '',  // Standalone repo
             repos: { dev: '', test: '', prod: '', beta: '' },
             versions: { dev: '', test: '', prod: '', beta: '' },
             repoPatterns: {
@@ -401,6 +415,7 @@
         landing: {
             id: 'landing', name: 'Landing Page', icon: '🚀',
             targetPath: 'index.html', swPath: '', hasServiceWorker: false,
+            subPath: '',  // Standalone repo
             repos: { dev: '', test: '', prod: '', beta: '' },
             versions: { dev: '', test: '', prod: '', beta: '' },
             repoPatterns: {
@@ -839,10 +854,35 @@
         return new Date(date).toLocaleString();
     }
     
-    function getGitHubPagesUrl(repo) {
+    // Get the URL for a GitHub Pages site
+    // Supports custom domains and subPaths for consolidated repos
+    function getGitHubPagesUrl(repo, subPath = '') {
         if (!repo) return null;
         const [owner, repoName] = repo.split('/');
+        
+        // Check for custom domain
+        if (CUSTOM_DOMAINS[repo]) {
+            const domain = CUSTOM_DOMAINS[repo];
+            // Custom domain - subPath goes after domain
+            if (subPath) {
+                return `https://${domain}/${subPath}/`;
+            }
+            return `https://${domain}/`;
+        }
+        
+        // Standard GitHub Pages URL
+        if (subPath) {
+            return `https://${owner}.github.io/${repoName}/${subPath}/`;
+        }
         return `https://${owner}.github.io/${repoName}/`;
+    }
+    
+    // Helper to get full file path in repo (prepends subPath if needed)
+    function getRepoFilePath(app, filename) {
+        if (app.subPath) {
+            return `${app.subPath}/${filename}`;
+        }
+        return filename;
     }
     
     function autoMapRepos(apps, repos) {
@@ -1432,7 +1472,7 @@
                 addStep('Restoring snapshot', 'complete', result.commit.sha.substring(0, 7));
                 
                 deployment.status = 'success';
-                deployment.url = getGitHubPagesUrl(snapshot.repo);
+                deployment.url = getGitHubPagesUrl(snapshot.repo, app.subPath);
                 
                 const versionKey = target === 'prod' ? 'currentProdVersion' : 'currentTestVersion';
                 updateApp(appId, { [versionKey]: snapshot.version });
@@ -1654,10 +1694,13 @@
             
             const updates = {};
             for (const [appId, app] of Object.entries(currentApps)) {
+                // Get the full path including subPath if set
+                const fullTargetPath = getRepoFilePath(app, app.targetPath);
+                
                 if (app.testRepo) {
                     try {
-                        console.log(`[${appId}] Fetching TEST from ${app.testRepo}/${app.targetPath}...`);
-                        const testFileData = await github.getFileContent(app.testRepo, app.targetPath);
+                        console.log(`[${appId}] Fetching TEST from ${app.testRepo}/${fullTargetPath}...`);
+                        const testFileData = await github.getFileContent(app.testRepo, fullTargetPath);
                         if (testFileData) {
                             // Use textContent which handles both normal and large files
                             const content = testFileData.textContent;
@@ -1674,8 +1717,8 @@
                 }
                 if (app.prodRepo) {
                     try {
-                        console.log(`[${appId}] Fetching PROD from ${app.prodRepo}/${app.targetPath}...`);
-                        const prodFileData = await github.getFileContent(app.prodRepo, app.targetPath);
+                        console.log(`[${appId}] Fetching PROD from ${app.prodRepo}/${fullTargetPath}...`);
+                        const prodFileData = await github.getFileContent(app.prodRepo, fullTargetPath);
                         if (prodFileData) {
                             // Use textContent which handles both normal and large files
                             const content = prodFileData.textContent;
@@ -1946,7 +1989,10 @@
             const repo = target === 'prod' ? app.prodRepo : app.testRepo;
             if (!repo) { await showAlert(`Configure ${target} repo`, 'Configuration Required'); return; }
             
-            const currentVersion = await fetchCurrentVersion(repo, app.targetPath);
+            // Get full path including subPath
+            const fullTargetPath = getRepoFilePath(app, file.targetPath || app.targetPath);
+            
+            const currentVersion = await fetchCurrentVersion(repo, fullTargetPath);
             const newVersion = file.version;
             
             if (!forceDeploy && currentVersion && newVersion) {
@@ -1957,7 +2003,7 @@
             }
             
             // 📸 Save rollback snapshot BEFORE deploying
-            await saveRollbackSnapshot(appId, target, repo, app.targetPath);
+            await saveRollbackSnapshot(appId, target, repo, fullTargetPath);
             
             const deployment = {
                 id: Date.now(), status: 'running', steps: [],
@@ -1997,9 +2043,9 @@
                 }
                 
                 addStep('Committing', 'running');
-                const currentFile = await github.getFile(repo, file.targetPath || app.targetPath);
+                const currentFile = await github.getFile(repo, fullTargetPath);
                 const result = await github.createOrUpdateFile(
-                    repo, file.targetPath || app.targetPath, file.content,
+                    repo, fullTargetPath, file.content,
                     `Deploy ${app.name} ${formatVersion(newVersion)}${currentVersion ? ` (was ${formatVersion(currentVersion)})` : ''}`,
                     currentFile?.sha
                 );
@@ -2026,7 +2072,7 @@
                 }
                 
                 deployment.status = 'success';
-                deployment.url = getGitHubPagesUrl(repo);
+                deployment.url = getGitHubPagesUrl(repo, app.subPath);
                 updateApp(appId, { [target === 'prod' ? 'currentProdVersion' : 'currentTestVersion']: newVersion });
                 removeStaged(file.id);
                 
@@ -2140,7 +2186,8 @@
             })));
             
             // 📸 Save rollback snapshot BEFORE deploying
-            await saveRollbackSnapshot(appId, target, repo, app.targetPath);
+            const fullTargetPath = getRepoFilePath(app, app.targetPath);
+            await saveRollbackSnapshot(appId, target, repo, fullTargetPath);
             
             const deployment = {
                 id: Date.now(), status: 'running', steps: [],
@@ -2168,8 +2215,9 @@
                 addStep('Preparing batch', 'complete', `${files.length} files`);
                 
                 addStep('Creating commit', 'running');
+                // Prepend subPath to all file paths if needed
                 const filesToCommit = files.map(f => ({
-                    path: f.targetPath || f.name,
+                    path: getRepoFilePath(app, f.targetPath || f.name),
                     content: f.content,
                     encoding: f.encoding
                 }));
@@ -2202,7 +2250,7 @@
                 }
                 
                 deployment.status = 'success';
-                deployment.url = getGitHubPagesUrl(repo);
+                deployment.url = getGitHubPagesUrl(repo, app.subPath);
                 
                 // Verify the deployment by fetching back from repo
                 console.log('=== VERIFYING DEPLOYMENT ===');
@@ -2210,7 +2258,7 @@
                 
                 // Always verify index.html (not binary files like PNGs)
                 try {
-                    const verifyFileData = await github.getFileContent(repo, 'index.html');
+                    const verifyFileData = await github.getFileContent(repo, fullTargetPath);
                     if (verifyFileData) {
                         // Use textContent which handles both normal and large files
                         const verifyContent = verifyFileData.textContent;
@@ -2332,24 +2380,28 @@
                 // Determine which files to promote
                 // For PWA apps: index.html, sw.js, manifest.json, icons/*
                 // For regular apps: just the targetPath (index.html)
-                const filesToPromote = [app.targetPath];
+                const baseFilesToPromote = [app.targetPath];
                 if (app.hasServiceWorker && app.swPath) {
-                    filesToPromote.push(app.swPath);
+                    baseFilesToPromote.push(app.swPath);
                 }
                 // Always check for manifest.json for PWA apps
                 if (app.hasServiceWorker) {
-                    filesToPromote.push('manifest.json');
+                    baseFilesToPromote.push('manifest.json');
                 }
+                
+                // Convert to full paths with subPath
+                const filesToPromote = baseFilesToPromote.map(f => getRepoFilePath(app, f));
                 
                 // For PWA apps, also check for icons folder
                 let iconFiles = [];
                 if (app.hasServiceWorker) {
                     try {
-                        const iconsContents = await github.listRepoContents(app.testRepo, 'icons');
+                        const iconsPath = getRepoFilePath(app, 'icons');
+                        const iconsContents = await github.listRepoContents(app.testRepo, iconsPath);
                         iconFiles = iconsContents
                             .filter(f => f.type === 'file' && /\.(png|ico|svg|webp)$/i.test(f.name))
-                            .map(f => `icons/${f.name}`);
-                        console.log(`Found ${iconFiles.length} icon files in TEST`);
+                            .map(f => getRepoFilePath(app, `icons/${f.name}`));
+                        console.log(`Found ${iconFiles.length} icon files in TEST at ${iconsPath}`);
                     } catch (e) {
                         console.log('No icons folder found in TEST');
                     }
@@ -2361,6 +2413,7 @@
                 let testVersion = null;
                 
                 // Fetch main PWA files
+                const fullTargetPath = getRepoFilePath(app, app.targetPath);
                 for (const filePath of filesToPromote) {
                     try {
                         const testFile = await github.getFile(app.testRepo, filePath);
@@ -2374,7 +2427,7 @@
                             });
                             
                             // Extract version from main HTML file (decode properly for reading)
-                            if (filePath === app.targetPath) {
+                            if (filePath === fullTargetPath) {
                                 const decodedContent = github.decodeContent(testFile.content);
                                 testVersion = extractVersionFromHTML(decodedContent);
                                 deployment.fileContent = decodedContent;
@@ -2412,13 +2465,13 @@
                 addStep('Fetching from TEST', 'complete', `${filesToCommit.length} files, ${formatVersion(testVersion)}`);
                 
                 addStep('Checking PROD', 'running');
-                const prodFileData = await github.getFileContent(app.prodRepo, app.targetPath);
+                const prodFileData = await github.getFileContent(app.prodRepo, fullTargetPath);
                 const prodVersion = prodFileData ? extractVersionFromHTML(prodFileData.textContent) : null;
                 deployment.previousVersion = prodVersion;
                 addStep('Checking PROD', 'complete', prodVersion ? formatVersion(prodVersion) : 'Empty');
                 
                 // 📸 Save rollback snapshot BEFORE promoting
-                await saveRollbackSnapshot(appId, 'prod', app.prodRepo, app.targetPath);
+                await saveRollbackSnapshot(appId, 'prod', app.prodRepo, fullTargetPath);
                 
                 addStep('Deploying', 'running', `${filesToCommit.length} files`);
                 
@@ -2453,7 +2506,7 @@
                 
                 deployment.status = 'success';
                 deployment.version = testVersion;
-                deployment.url = getGitHubPagesUrl(app.prodRepo);
+                deployment.url = getGitHubPagesUrl(app.prodRepo, app.subPath);
                 updateApp(appId, { currentProdVersion: testVersion });
                 
                 // Force refresh to ensure UI is in sync
@@ -2514,15 +2567,18 @@
             };
             
             try {
+                // Get full path including subPath
+                const fullTargetPath = getRepoFilePath(app, app.targetPath);
+                
                 addStep('Getting current state', 'running');
-                const currentFileData = await github.getFileContent(repo, app.targetPath);
+                const currentFileData = await github.getFileContent(repo, fullTargetPath);
                 // Use textContent which handles both normal and large files
                 const currentVersion = currentFileData ? extractVersionFromHTML(currentFileData.textContent) : null;
                 deployment.previousVersion = currentVersion;
                 addStep('Getting current state', 'complete', formatVersion(currentVersion));
                 
                 addStep('Fetching rollback version', 'running');
-                const rollbackFileData = await github.getFileContentAtCommit(repo, app.targetPath, deploymentToRollbackTo.commitSha);
+                const rollbackFileData = await github.getFileContentAtCommit(repo, fullTargetPath, deploymentToRollbackTo.commitSha);
                 if (!rollbackFileData) throw new Error('Cannot find file at that commit');
                 // Use textContent which handles both normal and large files
                 const content = rollbackFileData.textContent;
@@ -2531,7 +2587,7 @@
                 
                 addStep('Rolling back', 'running');
                 const result = await github.createOrUpdateFile(
-                    repo, app.targetPath, content,
+                    repo, fullTargetPath, content,
                     `Rollback ${app.name} to ${formatVersion(targetVersion)} (was ${formatVersion(currentVersion)})`,
                     currentFileData?.sha
                 );
@@ -2539,7 +2595,7 @@
                 addStep('Rolling back', 'complete', result.commit.sha.substring(0, 7));
                 
                 deployment.status = 'success';
-                deployment.url = getGitHubPagesUrl(repo);
+                deployment.url = getGitHubPagesUrl(repo, app.subPath);
                 const versionKey = deploymentToRollbackTo.target === 'prod' ? 'currentProdVersion' : 'currentTestVersion';
                 updateApp(deploymentToRollbackTo.appId, { [versionKey]: targetVersion });
                 
@@ -2572,7 +2628,7 @@
                             <Icons.GameShelfLogo size={32} />
                             <div>
                                 <h1 className="text-lg font-bold">Command Center</h1>
-                                <div className="text-xs text-slate-400">v7.2.6 • Fixed deploy package to include icons-test and manifest-test.json</div>
+                                <div className="text-xs text-slate-400">v7.3.0 • Consolidated repo support with subPath and custom domains</div>
                             </div>
                         </div>
                         <div className="flex items-center gap-2">
@@ -3604,8 +3660,8 @@
                         <div className="space-y-3">
                             {configuredApps.map(app => {
                                 const canPromote = app.testRepo && app.prodRepo && app.currentTestVersion && app.currentTestVersion !== app.currentProdVersion;
-                                const testUrl = getGitHubPagesUrl(app.testRepo);
-                                const prodUrl = getGitHubPagesUrl(app.prodRepo);
+                                const testUrl = getGitHubPagesUrl(app.testRepo, app.subPath);
+                                const prodUrl = getGitHubPagesUrl(app.prodRepo, app.subPath);
                                 const testDeploying = deployingRepos && deployingRepos[app.testRepo];
                                 const prodDeploying = deployingRepos && deployingRepos[app.prodRepo];
                                 const isExpanded = expandedApps[app.id];
@@ -7649,7 +7705,7 @@ const pushIssueToCommandCenter = async (testResult) => {
                 const dayOfWeek = new Date().toLocaleDateString('en-US', { weekday: 'long' });
                 
                 let briefing = `# Claude Session Briefing - ${dayOfWeek}, ${today}\n\n`;
-                briefing += `Generated by Command Center v7.2.6\n\n`;
+                briefing += `Generated by Command Center v7.3.0\n\n`;
                 briefing += `---\n\n`;
                 
                 // Deployed Versions
