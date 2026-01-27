@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Game Shelf Command Center</title>
-    <meta name="version" content="8.1.0">
+    <meta name="version" content="8.1.2">
     <meta name="gs-app-id" content="management">
     <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
@@ -27,7 +27,7 @@
     <div id="root"><div style="display:flex;align-items:center;justify-content:center;min-height:100vh;"><div style="text-align:center;"><div style="margin-bottom:20px;"><svg viewBox="0 0 100 100" width="64" height="64" xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="gsLoadGrad" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" style="stop-color:#667eea"/><stop offset="100%" style="stop-color:#764ba2"/></linearGradient></defs><rect x="5" y="5" width="90" height="90" rx="20" fill="url(#gsLoadGrad)"/><g transform="rotate(-12, 35, 50)"><rect x="15" y="28" width="28" height="36" rx="4" fill="white"/><circle cx="43" cy="46" r="6" fill="white"/><text x="29" y="54" font-family="Arial" font-size="20" font-weight="bold" fill="#667eea" text-anchor="middle">G</text></g><g transform="rotate(12, 65, 50)"><rect x="57" y="28" width="28" height="36" rx="4" fill="rgba(255,255,255,0.9)"/><circle cx="57" cy="46" r="6" fill="url(#gsLoadGrad)"/><text x="71" y="54" font-family="Arial" font-size="20" font-weight="bold" fill="#764ba2" text-anchor="middle">S</text></g></svg></div>Loading...</div></div></div>
 
     <script type="text/babel">
-    console.log('Command Center v8.1.0 starting...');
+    console.log('Command Center v8.1.2 starting...');
     
     // =========================================================================
     // FIREBASE CONFIG
@@ -2004,6 +2004,17 @@
                                 missing: versionValidation.missing
                             });
                         }
+                    } else if (file.name.endsWith('.js') && isText) {
+                        // Check if this is Firebase Functions code
+                        appDetection = detectAppFromContent(content);
+                        if (appDetection) {
+                            suggestedApp = appDetection.id;
+                            console.log('=== JS FILE APP DETECTED ===');
+                            console.log('Detected:', appDetection.id);
+                            console.log('Confidence:', appDetection.confidence);
+                        } else {
+                            suggestedApp = parsed.app;
+                        }
                     } else {
                         suggestedApp = parsed.app;
                     }
@@ -2014,6 +2025,15 @@
                     console.log('Version:', version);
                     console.log('Suggested App:', suggestedApp, appDetection ? '(from content)' : '(from filename)');
                     
+                    // Clean up Claude download filenames (e.g., index_4.js → index.js)
+                    let cleanedName = file.name;
+                    const claudeDownloadPattern = /^(.+?)_\d+(\.[a-z]+)$/i;
+                    const claudeMatch = file.name.match(claudeDownloadPattern);
+                    if (claudeMatch) {
+                        cleanedName = claudeMatch[1] + claudeMatch[2];
+                        console.log('Cleaned filename:', file.name, '→', cleanedName);
+                    }
+                    
                     // Determine targetPath: use app-specific path if detected, else default logic
                     let targetPath;
                     if (suggestedApp && DEFAULT_APP_DEFINITIONS[suggestedApp]) {
@@ -2021,12 +2041,13 @@
                     } else if (file.name.endsWith('.html')) {
                         targetPath = 'index.html';
                     } else {
-                        targetPath = file.name;
+                        targetPath = cleanedName;
                     }
                     
                     setStagedFiles(prev => [...prev, {
                         id: Date.now() + Math.random(),
-                        name: file.name,
+                        name: cleanedName,
+                        originalName: file.name !== cleanedName ? file.name : undefined,
                         size: file.size,
                         content: isText ? content : btoa(content),
                         encoding: isText ? 'utf-8' : 'base64',
@@ -2709,7 +2730,7 @@
                                 <Icons.GameShelfLogo size={32} />
                                 <div>
                                     <h1 className="text-lg font-bold">Command Center</h1>
-                                    <div className="text-xs text-slate-400">v8.1.0 • Firebase Functions support</div>
+                                    <div className="text-xs text-slate-400">v8.1.2 • Firebase Functions support</div>
                                 </div>
                             </div>
                             <div className="flex items-center gap-1">
@@ -3606,8 +3627,28 @@
             if (filesWithDetection.length > 0) {
                 const detected = filesWithDetection[filesWithDetection.length - 1].suggestedApp;
                 if (detected && apps[detected]) {
-                    setDeployTarget(prev => ({ ...prev, appId: detected }));
-                    console.log('🎯 Auto-selected app:', detected);
+                    // Firebase Functions only deploys to prod (GitHub Actions handles it)
+                    const targetEnv = detected === 'firebase-functions' ? 'prod' : 'test';
+                    setDeployTarget(prev => ({ ...prev, appId: detected, target: targetEnv }));
+                    console.log('🎯 Auto-selected app:', detected, 'target:', targetEnv);
+                    
+                    // If app has no repo assigned, try to auto-assign from available repos
+                    const app = apps[detected];
+                    if (!app.prodRepo && github) {
+                        console.log('🔍 No prod repo for', detected, '- attempting auto-assignment...');
+                        // Find repo matching this app's patterns
+                        github.listRepos().then(repos => {
+                            const patterns = app.repoPatterns?.prod || [];
+                            for (const pattern of patterns) {
+                                const found = repos.find(r => r.name.toLowerCase() === pattern.toLowerCase() && !r.name.toLowerCase().includes('test'));
+                                if (found) {
+                                    console.log('✅ Auto-assigned prod repo:', found.fullName);
+                                    updateApp(detected, { prodRepo: found.fullName });
+                                    break;
+                                }
+                            }
+                        }).catch(e => console.warn('Could not auto-assign repo:', e));
+                    }
                 }
             }
         }, [stagedFiles.length]); // Only when file count changes (new file added)
