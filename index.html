@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Game Shelf Command Center</title>
-    <meta name="version" content="8.1.8">
+    <meta name="version" content="8.2.0">
     <meta name="gs-app-id" content="management">
     <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
@@ -27,7 +27,7 @@
     <div id="root"><div style="display:flex;align-items:center;justify-content:center;min-height:100vh;"><div style="text-align:center;"><div style="margin-bottom:20px;"><svg viewBox="0 0 100 100" width="64" height="64" xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="gsLoadGrad" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" style="stop-color:#667eea"/><stop offset="100%" style="stop-color:#764ba2"/></linearGradient></defs><rect x="5" y="5" width="90" height="90" rx="20" fill="url(#gsLoadGrad)"/><g transform="rotate(-12, 35, 50)"><rect x="15" y="28" width="28" height="36" rx="4" fill="white"/><circle cx="43" cy="46" r="6" fill="white"/><text x="29" y="54" font-family="Arial" font-size="20" font-weight="bold" fill="#667eea" text-anchor="middle">G</text></g><g transform="rotate(12, 65, 50)"><rect x="57" y="28" width="28" height="36" rx="4" fill="rgba(255,255,255,0.9)"/><circle cx="57" cy="46" r="6" fill="url(#gsLoadGrad)"/><text x="71" y="54" font-family="Arial" font-size="20" font-weight="bold" fill="#764ba2" text-anchor="middle">S</text></g></svg></div>Loading...</div></div></div>
 
     <script type="text/babel">
-    console.log('Command Center v8.1.8 starting...');
+    console.log('Command Center v8.2.0 starting...');
     
     // =========================================================================
     // FIREBASE CONFIG
@@ -1701,6 +1701,8 @@
             const pollInterval = 5000; // Check every 5 seconds
             const startTime = Date.now();
             let attempts = 0;
+            let corsFailures = 0;
+            const maxCorsFailures = 3; // Give up after 3 CORS errors
             
             console.log(`=== MONITORING LIVE DEPLOYMENT ===`);
             console.log(`URL: ${url}`);
@@ -1716,9 +1718,9 @@
                 
                 try {
                     // Fetch the live site with cache-busting
-                    const response = await fetch(`${url}?_nocache=${Date.now()}`, {
-                        cache: 'no-store',
-                        headers: { 'Cache-Control': 'no-cache' }
+                    // Don't set custom headers - they trigger CORS preflight which GitHub Pages doesn't support
+                    const response = await fetch(`${url}?_t=${Date.now()}`, {
+                        cache: 'no-store'
                     });
                     
                     if (response.ok) {
@@ -1726,6 +1728,7 @@
                         const liveVersion = extractVersionFromHTML(html);
                         
                         console.log(`[${elapsed}s] Live version: ${liveVersion || 'unknown'}, expecting: ${expectedVersion}`);
+                        corsFailures = 0; // Reset on success
                         
                         if (liveVersion === expectedVersion) {
                             console.log(`=== DEPLOYMENT COMPLETE! Version ${liveVersion} is live ===`);
@@ -1744,7 +1747,21 @@
                         onUpdate('running', `Waiting... ${elapsed}s (site loading)`);
                     }
                 } catch (e) {
-                    console.log(`[${elapsed}s] Fetch error:`, e.message);
+                    corsFailures++;
+                    console.log(`[${elapsed}s] Fetch error (${corsFailures}/${maxCorsFailures}):`, e.message);
+                    
+                    // If we keep getting CORS/network errors, stop monitoring
+                    if (corsFailures >= maxCorsFailures) {
+                        console.log(`=== CORS/NETWORK ERRORS - STOPPING MONITOR ===`);
+                        onUpdate('complete', `Commit pushed ✓ (verify at site)`);
+                        setDeployingRepos(prev => {
+                            const next = { ...prev };
+                            delete next[repo];
+                            return next;
+                        });
+                        return { success: true, corsBlocked: true };
+                    }
+                    
                     onUpdate('running', `Waiting... ${elapsed}s`);
                 }
                 
@@ -2567,7 +2584,24 @@
         // Promote TEST → PROD
         const handlePromote = async (appId) => {
             const app = apps[appId];
-            if (!app.testRepo || !app.prodRepo) return;
+            
+            // Check for required repos - don't fail silently!
+            if (!app) {
+                await showAlert(`App "${appId}" not found`, 'Promote Error');
+                return;
+            }
+            if (!app.testRepo) {
+                await showAlert(`No TEST repo configured for ${app.name}. Assign a test repo first.`, 'Promote Error');
+                return;
+            }
+            if (!app.prodRepo) {
+                await showAlert(`No PROD repo configured for ${app.name}. Assign a production repo first.`, 'Promote Error');
+                return;
+            }
+            
+            console.log(`[Promote] Starting promotion for ${appId}`);
+            console.log(`[Promote] TEST repo: ${app.testRepo}`);
+            console.log(`[Promote] PROD repo: ${app.prodRepo}`);
             
             setModal(null);
             
@@ -2633,26 +2667,44 @@
                     try {
                         const testFile = await github.getFile(app.testRepo, filePath);
                         if (testFile) {
-                            // Keep base64 for committing to avoid UTF-8 corruption
-                            // Strip newlines - GitHub returns base64 with line breaks
+                            let base64Content;
+                            let decodedContent = null;
+                            
+                            // Handle large files (>1MB) - GitHub doesn't return content, only download_url
+                            if (!testFile.content && testFile.download_url) {
+                                console.log(`📦 Large file detected: ${filePath}, using download_url`);
+                                const cacheBustUrl = testFile.download_url + (testFile.download_url.includes('?') ? '&' : '?') + '_=' + Date.now();
+                                const response = await fetch(cacheBustUrl);
+                                const textContent = await response.text();
+                                // Re-encode to base64 for commit
+                                base64Content = btoa(unescape(encodeURIComponent(textContent)));
+                                decodedContent = textContent;
+                            } else if (testFile.content) {
+                                // Normal file - use base64 directly
+                                base64Content = github.cleanBase64(testFile.content);
+                                decodedContent = github.decodeContent(testFile.content);
+                            } else {
+                                console.log(`⚠ ${filePath} has no content and no download_url, skipping`);
+                                continue;
+                            }
+                            
                             filesToCommit.push({
                                 path: filePath,
-                                content: github.cleanBase64(testFile.content),
+                                content: base64Content,
                                 encoding: 'base64'
                             });
                             
-                            // Extract version from main HTML file (decode properly for reading)
-                            if (filePath === fullTargetPath) {
-                                const decodedContent = github.decodeContent(testFile.content);
+                            // Extract version from main HTML file
+                            if (filePath === fullTargetPath && decodedContent) {
                                 testVersion = extractVersionFromHTML(decodedContent);
                                 deployment.fileContent = decodedContent;
                             }
                             
-                            console.log(`✓ Found ${filePath} in TEST`);
+                            console.log(`✓ Found ${filePath} in TEST (${base64Content.length} bytes base64)`);
                         }
                     } catch (e) {
                         // File doesn't exist in TEST, skip it (manifest.json might not exist)
-                        console.log(`⚠ ${filePath} not found in TEST, skipping`);
+                        console.log(`⚠ ${filePath} not found in TEST, skipping: ${e.message}`);
                     }
                 }
                 
@@ -2661,6 +2713,12 @@
                     try {
                         const iconFile = await github.getFile(app.testRepo, iconPath);
                         if (iconFile) {
+                            // Icons should always have content (they're small)
+                            // But check just in case
+                            if (!iconFile.content) {
+                                console.warn(`⚠ Icon ${iconPath} has no content (too large?), skipping`);
+                                continue;
+                            }
                             filesToCommit.push({
                                 path: iconPath,
                                 content: github.cleanBase64(iconFile.content),
@@ -2845,7 +2903,7 @@
                                 <Icons.GameShelfLogo size={32} />
                                 <div>
                                     <h1 className="text-lg font-bold">Command Center</h1>
-                                    <div className="text-xs text-slate-400">v8.1.8 • Firebase Functions + YML support</div>
+                                    <div className="text-xs text-slate-400">v8.2.0 • Large file promotion fix</div>
                                 </div>
                             </div>
                             <div className="flex items-center gap-1">
@@ -2965,7 +3023,13 @@
                             apps={apps} stagedFiles={stagedFiles} github={github}
                             onFileDrop={handleFileDrop} onRemove={removeStaged}
                             onDeploy={handleDeploy} onBatchDeploy={handleBatchDeploy}
-                            onPromote={(id) => setModal({ type: 'promote', data: { appId: id } })}
+                            onPromote={(id) => {
+                                console.log('[Promote Modal] Opening for:', id);
+                                console.log('[Promote Modal] App state:', apps[id]);
+                                console.log('[Promote Modal] testRepo:', apps[id]?.testRepo);
+                                console.log('[Promote Modal] prodRepo:', apps[id]?.prodRepo);
+                                setModal({ type: 'promote', data: { appId: id } });
+                            }}
                             activeDeployment={activeDeployment}
                             setActiveDeployment={setActiveDeployment}
                             refreshing={refreshing}
