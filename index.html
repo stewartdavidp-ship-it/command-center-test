@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Game Shelf Command Center</title>
-    <meta name="version" content="8.2.3">
+    <meta name="version" content="8.2.7">
     <meta name="gs-app-id" content="management">
     <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
@@ -27,7 +27,7 @@
     <div id="root"><div style="display:flex;align-items:center;justify-content:center;min-height:100vh;"><div style="text-align:center;"><div style="margin-bottom:20px;"><svg viewBox="0 0 100 100" width="64" height="64" xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="gsLoadGrad" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" style="stop-color:#667eea"/><stop offset="100%" style="stop-color:#764ba2"/></linearGradient></defs><rect x="5" y="5" width="90" height="90" rx="20" fill="url(#gsLoadGrad)"/><g transform="rotate(-12, 35, 50)"><rect x="15" y="28" width="28" height="36" rx="4" fill="white"/><circle cx="43" cy="46" r="6" fill="white"/><text x="29" y="54" font-family="Arial" font-size="20" font-weight="bold" fill="#667eea" text-anchor="middle">G</text></g><g transform="rotate(12, 65, 50)"><rect x="57" y="28" width="28" height="36" rx="4" fill="rgba(255,255,255,0.9)"/><circle cx="57" cy="46" r="6" fill="url(#gsLoadGrad)"/><text x="71" y="54" font-family="Arial" font-size="20" font-weight="bold" fill="#764ba2" text-anchor="middle">S</text></g></svg></div>Loading...</div></div></div>
 
     <script type="text/babel">
-    console.log('Command Center v8.2.3 starting...');
+    console.log('Command Center v8.2.7 starting...');
     
     // =========================================================================
     // FIREBASE CONFIG
@@ -786,6 +786,15 @@
                     /<title>.*ship\s*it/i,
                     /command-center/i,
                     /claude.*deploy.*queue/i
+                ]
+            },
+            {
+                id: 'beta',
+                patterns: [
+                    /<title>game\s*shelf\s*beta\s*hub/i,
+                    /beta\s*hub\s*v\d/i,
+                    /gs-app-id.*beta/i,
+                    /earlyAccess.*surveyResponses/i
                 ]
             },
             {
@@ -2951,7 +2960,7 @@
                                 <Icons.GameShelfLogo size={32} />
                                 <div>
                                     <h1 className="text-lg font-bold">Command Center</h1>
-                                    <div className="text-xs text-slate-400">v8.2.3 • Added Beta Hub app support</div>
+                                    <div className="text-xs text-slate-400">v8.2.7 • Beta Hub prod-only default</div>
                                 </div>
                             </div>
                             <div className="flex items-center gap-1">
@@ -3843,6 +3852,7 @@
         const [deployTarget, setDeployTarget] = React.useState({ appId: 'management', target: 'test' });
         const [isDeploying, setIsDeploying] = React.useState(false);
         const [deployCompleted, setDeployCompleted] = React.useState(false);
+        const [lastCompletedDeployId, setLastCompletedDeployId] = React.useState(null); // v8.2.7: Track which deployment completed
         const configuredApps = Object.values(apps).filter(a => a.testRepo || a.prodRepo);
         
         // Auto-select detected app when staging new files
@@ -3854,10 +3864,16 @@
             if (filesWithDetection.length > 0) {
                 const detected = filesWithDetection[filesWithDetection.length - 1].suggestedApp;
                 if (detected && apps[detected]) {
-                    // Firebase Functions only deploys to prod (GitHub Actions handles it)
-                    const targetEnv = detected === 'firebase-functions' ? 'prod' : 'test';
+                    // Determine default environment:
+                    // - Firebase Functions: always prod
+                    // - Apps with no test repo patterns in defaults: prod (e.g., Beta Hub)
+                    // - Otherwise: test (safer default)
+                    // Check DEFAULT_APP_DEFINITIONS for canonical patterns (localStorage may be stale)
+                    const defaultPatterns = DEFAULT_APP_DEFINITIONS[detected]?.repoPatterns?.test || [];
+                    const hasTestPatterns = defaultPatterns.length > 0;
+                    const targetEnv = (detected === 'firebase-functions' || !hasTestPatterns) ? 'prod' : 'test';
                     setDeployTarget(prev => ({ ...prev, appId: detected, target: targetEnv }));
-                    console.log('🎯 Auto-selected app:', detected, 'target:', targetEnv);
+                    console.log('🎯 Auto-selected app:', detected, 'target:', targetEnv, hasTestPatterns ? '(has test)' : '(prod only)');
                     
                     // If app has no repo assigned, try to auto-assign from available repos
                     const app = apps[detected];
@@ -3889,12 +3905,14 @@
                 } else if (activeDeployment.status === 'success' || activeDeployment.status === 'failed' || activeDeployment.status === 'error') {
                     // Only stop spinner when deployment finishes (success or failure)
                     setIsDeploying(false);
-                    if (activeDeployment.status === 'success') {
+                    // v8.2.7: Only set deployCompleted if this is a NEW completed deployment
+                    if (activeDeployment.status === 'success' && activeDeployment.id !== lastCompletedDeployId) {
                         setDeployCompleted(true);
+                        setLastCompletedDeployId(activeDeployment.id);
                     }
                 }
             }
-        }, [activeDeployment, activeDeployment?.status]);
+        }, [activeDeployment, activeDeployment?.status, activeDeployment?.id, lastCompletedDeployId]);
         
         // Reset deployCompleted when staging new files
         React.useEffect(() => {
