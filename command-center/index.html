@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Command Center</title>
-    <meta name="version" content="8.15.2">
+    <meta name="version" content="8.15.3">
     <meta name="gs-app-id" content="command-center">
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -3023,7 +3023,7 @@
                                     if (fileAction === 'skip') return; // Skip SESSION_BRIEF.md etc.
                                     
                                     // For push-doc files, compute the repo target path
-                                    let docTargetPath = targetPath;
+                                    let docTargetPath = fileName; // Default: just the filename at root
                                     if (fileAction === 'push-doc' && suggestedApp) {
                                         const docApp = apps[suggestedApp];
                                         if (docApp) {
@@ -4666,6 +4666,7 @@
                                         docsByApp[appId].push(doc);
                                     }
                                     
+                                    const pushedDocIds = [];
                                     for (const [appId, appDocs] of Object.entries(docsByApp)) {
                                         const app = apps[appId];
                                         if (!app) continue;
@@ -4690,10 +4691,15 @@
                                                     sha
                                                 );
                                                 console.log(`✅ Pushed ${doc.name} → ${repo}/${doc.targetPath}`);
+                                                pushedDocIds.push(doc.id);
                                             } catch (e) {
                                                 console.error(`❌ Failed to push ${doc.name}:`, e.message);
                                             }
                                         }
+                                    }
+                                    // Remove successfully pushed docs from staged files
+                                    if (pushedDocIds.length > 0) {
+                                        setStagedFiles(prev => prev.filter(f => !pushedDocIds.includes(f.id)));
                                     }
                                 }
                             }}
@@ -5926,6 +5932,7 @@
                                                 const repo = app?.repos?.prod || app?.prodRepo || app?.repos?.test || app?.testRepo;
                                                 if (repo) {
                                                     console.log('Pushing docs to:', repo);
+                                                    const pushedDocIds = [];
                                                     for (const doc of selectedDocFiles) {
                                                         try {
                                                             const existing = await github.getFile(repo, doc.targetPath);
@@ -5938,9 +5945,14 @@
                                                                 sha
                                                             );
                                                             console.log(`✅ Pushed ${doc.name} → ${repo}/${doc.targetPath}`);
+                                                            pushedDocIds.push(doc.id);
                                                         } catch (e) {
                                                             console.error(`❌ Failed to push ${doc.name}:`, e.message);
                                                         }
+                                                    }
+                                                    // Remove successfully pushed docs from staged files
+                                                    if (pushedDocIds.length > 0) {
+                                                        setStagedFiles(prev => prev.filter(f => !pushedDocIds.includes(f.id)));
                                                     }
                                                 }
                                             }
