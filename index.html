@@ -8177,6 +8177,8 @@
         const [errorOverride, setErrorOverride] = React.useState(false);
         // Track if deploy button was clicked in this session (prevents history-based false positive)
         const deployClickedThisSession = React.useRef(false);
+        // Track if the full batch action (deploy + doc push) is still running
+        const [batchActionRunning, setBatchActionRunning] = React.useState(false);
         
         const [otherCollapsed, setOtherCollapsed] = React.useState(true); // v8.3.3: Collapse "Other" by default
         
@@ -8869,9 +8871,9 @@
                                     {(() => {
                                         const hasValidationError = validation?.severity === 'error' && !errorOverride;
                                         
-                                        const buttonDisabled = !github || isDeploying || hasValidationError;
+                                        const buttonDisabled = !github || isDeploying || batchActionRunning || hasValidationError;
                                         const buttonStyle = (() => {
-                                            if (isDeploying) return 'bg-emerald-700 cursor-wait';
+                                            if (isDeploying || batchActionRunning) return 'bg-emerald-700 cursor-wait';
                                             if (deployCompleted) return 'bg-orange-500 hover:bg-orange-600';
                                             if (hasValidationError) return 'bg-slate-600 cursor-not-allowed opacity-50';
                                             if (validation?.severity === 'error' && errorOverride) return 'bg-red-600 hover:bg-red-700';
@@ -8881,7 +8883,7 @@
                                         })();
                                         
                                         const buttonPrefix = (() => {
-                                            if (isDeploying || deployCompleted) return '';
+                                            if (isDeploying || deployCompleted || batchActionRunning) return '';
                                             if (hasValidationError) return '🚫 ';
                                             if (validation?.severity === 'error' && errorOverride) return '⚠️ ';
                                             if (validation?.severity === 'warning') return '⚠️ ';
@@ -8895,8 +8897,10 @@
                                             
                                             const executeBatchAction = async () => {
                                                 setIsDeploying(true);
+                                                setBatchActionRunning(true);
                                                 deployClickedThisSession.current = true;
                                                 
+                                                try {
                                                 if (selectedDeployFiles.length > 0) {
                                                     console.log('Deploying files:', selectedDeployFiles.map(f => ({ name: f.name, id: f.id, size: f.content?.length })));
                                                     await onBatchDeploy(selectedDeployFiles, deployTarget.appId, deployTarget.target);
@@ -8930,6 +8934,9 @@
                                                         }
                                                     }
                                                 }
+                                                } finally {
+                                                    setBatchActionRunning(false);
+                                                }
                                                 
                                                 // v8.36.1: Smart reset — use app's intelligent default, not always TEST
                                                 setDeployTarget(prev => ({ ...prev, target: getSmartTarget(prev.appId) }));
@@ -8947,10 +8954,10 @@
                                         }}
                                             disabled={buttonDisabled}
                                             className={`w-full p-3 rounded font-medium flex items-center justify-center gap-2 transition-all ${buttonStyle}`}>
-                                            {isDeploying ? (
+                                            {isDeploying || batchActionRunning ? (
                                                 <>
                                                     <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                                                    Deploying...
+                                                    {batchActionRunning && !isDeploying ? 'Pushing docs...' : 'Deploying...'}
                                                 </>
                                             ) : deployCompleted ? (
                                                 <>
@@ -22772,11 +22779,14 @@ const pushIssueToCommandCenter = async (testResult) => {
         const notIncremented = issues.find(i => i.id === 'version-not-incremented');
         if (notIncremented) {
             const suggested = bumpVersion(deployedVersion || deployVersion, 'patch');
+            const isDowngrade = deployVersion && deployedVersion && compareVersions(deployVersion, deployedVersion) < 0;
             lines.push('Version not incremented:');
-            lines.push(`• Code is v${deployVersion} — same as deployed`);
+            lines.push(`• Code is v${deployVersion} — ${isDowngrade ? `OLDER than deployed v${deployedVersion}` : 'same as deployed'}`);
             lines.push(`• Bump to v${suggested} (or appropriate version)`);
-            lines.push('• Update ALL version locations in index.html');
-            lines.push('• Update sw.js CACHE_VERSION to match');
+            lines.push(`• Update <meta name="version"> in index.html`);
+            if (appConfig?.hasServiceWorker) {
+                lines.push('• Update sw.js CACHE_VERSION to match');
+            }
             lines.push('');
         }
 
