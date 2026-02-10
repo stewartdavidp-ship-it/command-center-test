@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Command Center</title>
-    <meta name="version" content="8.38.0">
+    <meta name="version" content="8.39.0">
     <meta name="gs-app-id" content="command-center">
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -1516,6 +1516,9 @@
                 packageFiles: sessionData.packageFiles || [],
                 deployId: null,
                 notes: sessionData.notes || '',
+                // Phase 3: Review tracking
+                review: null,       // { criteriaResults: [{id, text, met: bool}], reviewedBy, reviewedAt, notes }
+                deliverables: null,  // { files: [string], importedAt, summary }
                 createdAt: new Date().toISOString(),
                 completedAt: null
             };
@@ -1542,6 +1545,33 @@
             console.log(`[SessionService] Linked deploy ${deployId} to session ${sessionId}`);
         },
         
+        // Phase 3: Start review — session moves from prep to review
+        async startReview(uid, sessionId, deliverables) {
+            await this.update(uid, sessionId, {
+                status: 'review',
+                deliverables: {
+                    files: deliverables.files || [],
+                    importedAt: new Date().toISOString(),
+                    summary: deliverables.summary || ''
+                }
+            });
+            console.log(`[SessionService] ${sessionId} → review (${deliverables.files?.length || 0} files)`);
+        },
+        
+        // Phase 3: Complete review with criteria results
+        async completeReview(uid, sessionId, reviewData) {
+            await this.update(uid, sessionId, {
+                review: {
+                    criteriaResults: reviewData.criteriaResults || [],
+                    reviewedBy: reviewData.reviewedBy || 'Owner',
+                    reviewedAt: new Date().toISOString(),
+                    notes: reviewData.notes || '',
+                    allMet: (reviewData.criteriaResults || []).every(c => c.met)
+                }
+            });
+            console.log(`[SessionService] ${sessionId} review complete`);
+        },
+        
         // Get recent sessions for an app
         getForApp(sessions, appId, limit = 5) {
             return sessions
@@ -1555,6 +1585,113 @@
                 s.status !== 'completed' && s.status !== 'abandoned' &&
                 (!appId || s.appId === appId)
             );
+        }
+    };
+    
+    /**
+     * ActivityLogService — Audit trail for all meaningful actions (Phase 3.4)
+     * Wraps: Firebase RTDB `command-center/{uid}/activity` path
+     * 
+     * Every meaningful action (deploy, session create/complete, work item transitions,
+     * scoping, reviews) writes an event. For solo use: audit trail.
+     * For Phase 5 multi-person: the activity feed everyone sees.
+     */
+    const ActivityLogService = {
+        BASE_PATH: 'command-center',
+        MAX_EVENTS: 500,
+        
+        _ref(uid) {
+            if (!firebaseDb || !uid) return null;
+            return firebaseDb.ref(`${this.BASE_PATH}/${uid}/activity`);
+        },
+        
+        // Listen for activity events (returns unsubscribe function)
+        listen(uid, callback, limit = 100) {
+            const ref = this._ref(uid);
+            if (!ref) return () => {};
+            
+            ref.orderByChild('timestamp').limitToLast(limit).on('value', (snapshot) => {
+                const data = snapshot.val();
+                if (data) {
+                    const list = Object.entries(data).map(([id, evt]) => ({ id, ...evt }));
+                    callback(list.sort((a, b) => new Date(b.timestamp || 0) - new Date(a.timestamp || 0)));
+                } else {
+                    callback([]);
+                }
+            });
+            
+            return () => ref.off();
+        },
+        
+        // Log an activity event
+        async log(uid, event) {
+            const ref = this._ref(uid);
+            if (!ref) return null;
+            
+            const eventId = `evt-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+            const entry = {
+                appId: event.appId || null,
+                streamId: event.streamId || null,
+                actor: event.actor || 'Owner',
+                action: event.action,          // deploy, session_create, session_complete, item_transition, scope, review
+                summary: event.summary,        // Human-readable: "Dave deployed Core Gameplay v0.9"
+                metadata: event.metadata || {},
+                timestamp: new Date().toISOString()
+            };
+            
+            await ref.child(eventId).set(entry);
+            return { id: eventId, ...entry };
+        },
+        
+        // Convenience loggers for common actions
+        async logDeploy(uid, actor, appName, version, env, sessionId) {
+            return this.log(uid, {
+                appId: appName,
+                actor,
+                action: 'deploy',
+                summary: `${actor} deployed ${appName} v${version} to ${env}`,
+                metadata: { version, environment: env, sessionId }
+            });
+        },
+        
+        async logSessionCreate(uid, actor, appName, sessionType, sessionId) {
+            return this.log(uid, {
+                appId: appName,
+                actor,
+                action: 'session_create',
+                summary: `${actor} started ${sessionType} session for ${appName}`,
+                metadata: { sessionType, sessionId }
+            });
+        },
+        
+        async logSessionComplete(uid, actor, appName, sessionId, itemsCompleted) {
+            return this.log(uid, {
+                appId: appName,
+                actor,
+                action: 'session_complete',
+                summary: `${actor} completed session for ${appName} — ${itemsCompleted} item${itemsCompleted !== 1 ? 's' : ''} done`,
+                metadata: { sessionId, itemsCompleted }
+            });
+        },
+        
+        async logItemTransition(uid, actor, appName, itemId, itemTitle, fromStatus, toStatus) {
+            return this.log(uid, {
+                appId: appName,
+                actor,
+                action: 'item_transition',
+                summary: `${actor} moved "${itemTitle}" from ${fromStatus} to ${toStatus}`,
+                metadata: { itemId, fromStatus, toStatus }
+            });
+        },
+        
+        async logReview(uid, actor, appName, sessionId, criteriaMetCount, criteriaTotalCount) {
+            return this.log(uid, {
+                appId: appName,
+                actor,
+                action: 'review',
+                summary: `${actor} reviewed ${appName} — ${criteriaMetCount}/${criteriaTotalCount} criteria met`,
+                metadata: { sessionId, criteriaMetCount, criteriaTotalCount }
+            });
         }
     };
     
@@ -5228,6 +5365,7 @@
         const [globalIssues, setGlobalIssues] = React.useState([]);
         const [globalWorkItems, setGlobalWorkItems] = React.useState([]);
         const [globalSessions, setGlobalSessions] = React.useState([]);
+        const [globalActivity, setGlobalActivity] = React.useState([]); // Phase 3.4: Activity log
         const [firebaseUid, setFirebaseUid] = React.useState(null);
         const [firebaseUser, setFirebaseUser] = React.useState(null);
         
@@ -5238,6 +5376,7 @@
             let unsubscribeIssues = () => {};
             let unsubscribeWorkItems = () => {};
             let unsubscribeSessions = () => {};
+            let unsubscribeActivity = () => {};
             
             const unsubscribe = firebaseAuth.onAuthStateChanged((u) => {
                 setFirebaseUser(u);
@@ -5249,11 +5388,14 @@
                     unsubscribeWorkItems = WorkItemService.listen(u.uid, setGlobalWorkItems);
                     // Listen for sessions via SessionService (v8.27.0)
                     unsubscribeSessions = SessionService.listen(u.uid, setGlobalSessions);
+                    // Listen for activity via ActivityLogService (v8.39.0 — Phase 3.4)
+                    unsubscribeActivity = ActivityLogService.listen(u.uid, setGlobalActivity);
                 } else {
                     setFirebaseUid(null);
                     setGlobalIssues([]);
                     setGlobalWorkItems([]);
                     setGlobalSessions([]);
+                    setGlobalActivity([]);
                 }
             });
             
@@ -5262,6 +5404,7 @@
                 unsubscribeIssues();
                 unsubscribeWorkItems();
                 unsubscribeSessions();
+                unsubscribeActivity();
             };
         }, []);
         
@@ -6325,6 +6468,10 @@
                         
                         console.log(`[Deploy] Linked to session ${latestSession.id} (${latestSession.type})`);
                     }
+                    
+                    // === Phase 3.4: Activity Logging ===
+                    const actor = config?.ownerName || 'Owner';
+                    ActivityLogService.logDeploy(firebaseUid, actor, app.name, newVersion, targetEnv, activeSessions[0]?.id || null).catch(e => console.warn('[Activity] Log failed:', e));
                 }
                 
                 // Start monitoring for deployment completion
@@ -7578,6 +7725,8 @@
                             showAlert={showAlert}
                             globalSessions={globalSessions}
                             globalWorkItems={globalWorkItems}
+                            firebaseUid={firebaseUid}
+                            config={config}
                         />
                     )}
                     
@@ -16278,7 +16427,7 @@
     // SESSION LOG VIEW
     // =========================================================================
     
-    function SessionLogView({ apps, sessionLog, setSessionLog, deployments, github, onFileDrop, showAlert, globalSessions, globalWorkItems }) {
+    function SessionLogView({ apps, sessionLog, setSessionLog, deployments, github, onFileDrop, showAlert, globalSessions, globalWorkItems, firebaseUid, config }) {
         const [newEntry, setNewEntry] = React.useState('');
         const [firebaseUser, setFirebaseUser] = React.useState(null);
         const [syncStatus, setSyncStatus] = React.useState('local');
@@ -16289,6 +16438,7 @@
         const [downloading, setDownloading] = React.useState(false);
         const [pendingDeploys, setPendingDeploys] = React.useState([]);
         const [activeSubTab, setActiveSubTab] = React.useState('log');
+        const [reviewingSession, setReviewingSession] = React.useState(null); // Phase 3: active review session
         const [apiKey, setApiKey] = React.useState(() => {
             try { return localStorage.getItem('cc_api_key') || ''; } catch { return ''; }
         });
@@ -16926,6 +17076,24 @@ The deploy will appear in Command Center's Session tab for one-click deployment.
                         workItems={globalWorkItems || []}
                         apps={apps}
                         deployments={deployments}
+                        firebaseUid={firebaseUid}
+                        config={config}
+                        showAlert={showAlert}
+                        onStartReview={(session) => setReviewingSession(session)}
+                    />
+                )}
+                
+                {/* Phase 3: Post-Session Review Modal */}
+                {reviewingSession && (
+                    <PostSessionReviewModal
+                        session={reviewingSession}
+                        workItems={globalWorkItems || []}
+                        app={apps[reviewingSession.appId]}
+                        onClose={() => setReviewingSession(null)}
+                        onDeploy={() => { setReviewingSession(null); setActiveSubTab('log'); }}
+                        showAlert={showAlert}
+                        firebaseUid={firebaseUid}
+                        config={config}
                     />
                 )}
             </div>
@@ -16933,7 +17101,354 @@ The deploy will appear in Command Center's Session tab for one-click deployment.
     }
     
     // === Session History Panel Component (v8.27.0 / Phase 2.3) ===
-    function SessionHistoryPanel({ sessions, workItems, apps, deployments }) {
+    // =========================================================================
+    // POST-SESSION REVIEW FLOW — Phase 3.1
+    // Inline guided flow: Review deliverables → Check criteria → Deploy decision → Close items
+    // =========================================================================
+    
+    function PostSessionReviewModal({ session, workItems, app, onClose, onDeploy, showAlert, firebaseUid, config }) {
+        const [step, setStep] = React.useState(1); // 1: Overview, 2: Criteria Review, 3: Deploy Decision, 4: Close Items
+        const [deliverableNotes, setDeliverableNotes] = React.useState(session?.deliverables?.summary || '');
+        const [criteriaResults, setCriteriaResults] = React.useState([]);
+        const [reviewNotes, setReviewNotes] = React.useState('');
+        const [closingItems, setClosingItems] = React.useState(new Set());
+        const [saving, setSaving] = React.useState(false);
+        
+        // Gather acceptance criteria from linked work items
+        const sessionWorkItemIds = React.useMemo(() => {
+            if (!session?.workItemId) return [];
+            return typeof session.workItemId === 'string' ? session.workItemId.split(',').map(s => s.trim()) : [session.workItemId];
+        }, [session]);
+        
+        const sessionWorkItems = React.useMemo(() => {
+            return (workItems || []).filter(wi => sessionWorkItemIds.includes(wi.id));
+        }, [workItems, sessionWorkItemIds]);
+        
+        // Initialize criteria results from work items
+        React.useEffect(() => {
+            const allCriteria = [];
+            sessionWorkItems.forEach(wi => {
+                (wi.criteria || []).forEach((text, idx) => {
+                    allCriteria.push({
+                        id: `${wi.id}-c${idx}`,
+                        itemId: wi.id,
+                        itemTitle: wi.title,
+                        text,
+                        met: false
+                    });
+                });
+            });
+            setCriteriaResults(allCriteria);
+            setClosingItems(new Set(sessionWorkItems.map(wi => wi.id)));
+        }, [sessionWorkItems]);
+        
+        const toggleCriteria = (criteriaId) => {
+            setCriteriaResults(prev => prev.map(c => c.id === criteriaId ? { ...c, met: !c.met } : c));
+        };
+        
+        const toggleCloseItem = (itemId) => {
+            setClosingItems(prev => {
+                const next = new Set(prev);
+                if (next.has(itemId)) next.delete(itemId); else next.add(itemId);
+                return next;
+            });
+        };
+        
+        const metCount = criteriaResults.filter(c => c.met).length;
+        const totalCriteria = criteriaResults.length;
+        const allMet = totalCriteria > 0 && metCount === totalCriteria;
+        
+        // Step 1: Save deliverable notes and move session to review
+        const handleStep1Complete = async () => {
+            if (firebaseUid && session) {
+                await SessionService.startReview(firebaseUid, session.id, {
+                    files: session.packageFiles || [],
+                    summary: deliverableNotes
+                });
+            }
+            setStep(totalCriteria > 0 ? 2 : 3);
+        };
+        
+        // Step 2: Save criteria review
+        const handleStep2Complete = async () => {
+            if (firebaseUid && session) {
+                const actor = config?.ownerName || 'Owner';
+                await SessionService.completeReview(firebaseUid, session.id, {
+                    criteriaResults,
+                    reviewedBy: actor,
+                    notes: reviewNotes
+                });
+                ActivityLogService.logReview(firebaseUid, actor, app?.name || session.appId, session.id, metCount, totalCriteria).catch(() => {});
+            }
+            setStep(3);
+        };
+        
+        // Step 3: Deploy decision — user clicks "Deploy Now" (triggers external deploy) or "Skip Deploy"
+        const handleDeploy = () => {
+            if (onDeploy) onDeploy(session);
+            onClose();
+        };
+        
+        // Step 4: Close work items
+        const handleCloseItems = async () => {
+            if (!firebaseUid) return;
+            setSaving(true);
+            const actor = config?.ownerName || 'Owner';
+            try {
+                for (const itemId of closingItems) {
+                    await WorkItemService.updateStatus(firebaseUid, itemId, 'done');
+                    const wi = sessionWorkItems.find(w => w.id === itemId);
+                    ActivityLogService.logItemTransition(firebaseUid, actor, app?.name || session.appId, itemId, wi?.title || itemId, 'in-progress', 'done').catch(() => {});
+                }
+                if (closingItems.size > 0) {
+                    ActivityLogService.logSessionComplete(firebaseUid, actor, app?.name || session.appId, session.id, closingItems.size).catch(() => {});
+                }
+                showAlert(`✅ Completed ${closingItems.size} work item${closingItems.size !== 1 ? 's' : ''}`, 'success');
+                onClose();
+            } catch (e) {
+                showAlert(`Error closing items: ${e.message}`, 'error');
+            } finally {
+                setSaving(false);
+            }
+        };
+        
+        const stepLabels = ['Overview', totalCriteria > 0 ? 'Verify' : null, 'Deploy', 'Close Items'].filter(Boolean);
+        const adjustedStep = totalCriteria === 0 && step >= 2 ? step : step;
+        
+        const StepIndicator = () => (
+            <div className="flex items-center gap-2 mb-6">
+                {stepLabels.map((label, i) => {
+                    const stepNum = i + 1;
+                    const isActive = step === (totalCriteria === 0 && stepNum >= 2 ? stepNum + 1 : stepNum);
+                    const isDone = (totalCriteria === 0 && stepNum >= 2 ? stepNum + 1 : stepNum) < step;
+                    return (
+                        <React.Fragment key={i}>
+                            {i > 0 && <div className={`flex-1 h-0.5 ${isDone ? 'bg-green-500' : 'bg-slate-600'}`} />}
+                            <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium ${
+                                isActive ? 'bg-indigo-600 text-white' : isDone ? 'bg-green-900/40 text-green-300' : 'bg-slate-700 text-slate-400'
+                            }`}>
+                                {isDone ? '✓' : stepNum}
+                                <span>{label}</span>
+                            </div>
+                        </React.Fragment>
+                    );
+                })}
+            </div>
+        );
+        
+        return (
+            <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" onClick={onClose}>
+                <div className="bg-slate-800 rounded-xl border border-slate-600 w-full max-w-2xl max-h-[85vh] overflow-y-auto shadow-2xl" onClick={e => e.stopPropagation()}>
+                    {/* Header */}
+                    <div className="sticky top-0 bg-slate-800 border-b border-slate-700 px-6 py-4 flex items-center justify-between rounded-t-xl z-10">
+                        <div>
+                            <div className="text-lg font-semibold text-white">Post-Session Review</div>
+                            <div className="text-sm text-slate-400 mt-0.5">
+                                {app?.icon || '📦'} {app?.name || session?.appId} — {session?.type || 'build'} session
+                            </div>
+                        </div>
+                        <button onClick={onClose} className="text-slate-400 hover:text-white text-xl">✕</button>
+                    </div>
+                    
+                    <div className="px-6 py-5">
+                        <StepIndicator />
+                        
+                        {/* Step 1: Overview — What did this session produce? */}
+                        {step === 1 && (
+                            <div className="space-y-4">
+                                <div>
+                                    <div className="text-sm font-medium text-slate-300 mb-1">What was built in this session?</div>
+                                    <div className="text-xs text-slate-500 mb-2">Summarize what Claude delivered. This becomes the session record.</div>
+                                    <textarea
+                                        value={deliverableNotes}
+                                        onChange={e => setDeliverableNotes(e.target.value)}
+                                        placeholder="e.g. Added share button, fixed mobile layout, updated scoring display..."
+                                        className="w-full px-3 py-2 bg-slate-900 border border-slate-600 rounded-lg text-sm text-white placeholder-slate-500 focus:border-indigo-500 outline-none resize-none"
+                                        rows={3}
+                                    />
+                                </div>
+                                
+                                {sessionWorkItems.length > 0 && (
+                                    <div>
+                                        <div className="text-sm font-medium text-slate-300 mb-2">Work items in this session</div>
+                                        <div className="space-y-2">
+                                            {sessionWorkItems.map(wi => (
+                                                <div key={wi.id} className="flex items-center gap-2 px-3 py-2 bg-slate-900/60 border border-slate-700 rounded-lg text-sm">
+                                                    <span className="text-indigo-400 font-mono text-xs">{wi.id}</span>
+                                                    <span className="text-slate-200">{wi.title}</span>
+                                                    <span className={`ml-auto text-xs px-1.5 py-0.5 rounded ${
+                                                        wi.status === 'in-progress' ? 'bg-blue-900/40 text-blue-300' : 'bg-slate-700 text-slate-400'
+                                                    }`}>{wi.status}</span>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
+                                
+                                <div className="flex justify-end pt-2">
+                                    <button onClick={handleStep1Complete} className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-sm font-medium">
+                                        {totalCriteria > 0 ? 'Next: Verify Criteria →' : 'Next: Deploy Decision →'}
+                                    </button>
+                                </div>
+                            </div>
+                        )}
+                        
+                        {/* Step 2: Criteria Review — Check acceptance criteria */}
+                        {step === 2 && totalCriteria > 0 && (
+                            <div className="space-y-4">
+                                <div>
+                                    <div className="text-sm font-medium text-slate-300 mb-1">
+                                        Acceptance criteria check — {metCount}/{totalCriteria} met
+                                    </div>
+                                    <div className="text-xs text-slate-500 mb-3">
+                                        Verify each criterion was met in the deliverables. Unmet criteria can become new work items.
+                                    </div>
+                                    
+                                    <div className="w-full bg-slate-700 rounded-full h-1.5 mb-4">
+                                        <div className={`h-1.5 rounded-full transition-all ${allMet ? 'bg-green-500' : 'bg-indigo-500'}`} 
+                                             style={{ width: `${totalCriteria > 0 ? (metCount / totalCriteria * 100) : 0}%` }} />
+                                    </div>
+                                    
+                                    <div className="space-y-2 max-h-60 overflow-y-auto">
+                                        {criteriaResults.map(c => (
+                                            <div key={c.id} 
+                                                 className={`flex items-start gap-3 px-3 py-2.5 rounded-lg border cursor-pointer transition-colors ${
+                                                     c.met ? 'bg-green-900/20 border-green-700/50' : 'bg-slate-900/60 border-slate-700 hover:border-slate-600'
+                                                 }`}
+                                                 onClick={() => toggleCriteria(c.id)}>
+                                                <div className={`w-5 h-5 rounded flex items-center justify-center flex-shrink-0 mt-0.5 ${
+                                                    c.met ? 'bg-green-600 text-white' : 'border-2 border-slate-500'
+                                                }`}>
+                                                    {c.met && <span className="text-xs">✓</span>}
+                                                </div>
+                                                <div>
+                                                    <div className={`text-sm ${c.met ? 'text-green-200' : 'text-slate-200'}`}>{c.text}</div>
+                                                    <div className="text-xs text-slate-500 mt-0.5">{c.itemTitle}</div>
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                                
+                                <div>
+                                    <div className="text-sm font-medium text-slate-300 mb-1">Review notes (optional)</div>
+                                    <textarea
+                                        value={reviewNotes}
+                                        onChange={e => setReviewNotes(e.target.value)}
+                                        placeholder="Any issues noticed, edge cases to retest, follow-up items..."
+                                        className="w-full px-3 py-2 bg-slate-900 border border-slate-600 rounded-lg text-sm text-white placeholder-slate-500 focus:border-indigo-500 outline-none resize-none"
+                                        rows={2}
+                                    />
+                                </div>
+                                
+                                {!allMet && (
+                                    <div className="bg-amber-900/20 border border-amber-700/50 rounded-lg px-3 py-2 text-sm text-amber-200">
+                                        ⚠️ {totalCriteria - metCount} criterion{totalCriteria - metCount !== 1 ? ' are' : ' is'} not yet met. 
+                                        You can still proceed — unmet items will be noted in the session record.
+                                    </div>
+                                )}
+                                
+                                <div className="flex justify-between pt-2">
+                                    <button onClick={() => setStep(1)} className="px-4 py-2 text-slate-400 hover:text-white text-sm">← Back</button>
+                                    <button onClick={handleStep2Complete} className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-sm font-medium">
+                                        Next: Deploy Decision →
+                                    </button>
+                                </div>
+                            </div>
+                        )}
+                        
+                        {/* Step 3: Deploy Decision */}
+                        {step === 3 && (
+                            <div className="space-y-4">
+                                <div className="text-sm font-medium text-slate-300 mb-1">Ready to deploy?</div>
+                                
+                                {/* Review summary */}
+                                {totalCriteria > 0 && (
+                                    <div className={`rounded-lg border px-4 py-3 ${allMet ? 'bg-green-900/20 border-green-700/50' : 'bg-amber-900/20 border-amber-700/50'}`}>
+                                        <div className={`text-sm font-medium ${allMet ? 'text-green-200' : 'text-amber-200'}`}>
+                                            {allMet ? '✅ All criteria met' : `⚠️ ${metCount}/${totalCriteria} criteria met`}
+                                        </div>
+                                        {reviewNotes && <div className="text-xs text-slate-400 mt-1">Notes: {reviewNotes}</div>}
+                                    </div>
+                                )}
+                                
+                                {deliverableNotes && (
+                                    <div className="bg-slate-900/60 border border-slate-700 rounded-lg px-4 py-3">
+                                        <div className="text-xs text-slate-400 mb-1">Session summary</div>
+                                        <div className="text-sm text-slate-200">{deliverableNotes}</div>
+                                    </div>
+                                )}
+                                
+                                <div className="grid grid-cols-2 gap-3 pt-2">
+                                    <button onClick={handleDeploy}
+                                        className="px-4 py-3 bg-green-600 hover:bg-green-500 text-white rounded-lg text-sm font-medium flex items-center justify-center gap-2">
+                                        🚀 Deploy Now
+                                    </button>
+                                    <button onClick={() => setStep(4)}
+                                        className="px-4 py-3 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded-lg text-sm font-medium flex items-center justify-center gap-2">
+                                        Skip Deploy →
+                                    </button>
+                                </div>
+                                
+                                <div className="flex justify-start pt-1">
+                                    <button onClick={() => setStep(totalCriteria > 0 ? 2 : 1)} className="px-4 py-2 text-slate-400 hover:text-white text-sm">← Back</button>
+                                </div>
+                            </div>
+                        )}
+                        
+                        {/* Step 4: Close Work Items */}
+                        {step === 4 && (
+                            <div className="space-y-4">
+                                <div>
+                                    <div className="text-sm font-medium text-slate-300 mb-1">Mark work items as done?</div>
+                                    <div className="text-xs text-slate-500 mb-3">Select which items were completed in this session.</div>
+                                </div>
+                                
+                                {sessionWorkItems.length > 0 ? (
+                                    <div className="space-y-2">
+                                        {sessionWorkItems.map(wi => (
+                                            <div key={wi.id} 
+                                                 className={`flex items-center gap-3 px-3 py-2.5 rounded-lg border cursor-pointer transition-colors ${
+                                                     closingItems.has(wi.id) ? 'bg-green-900/20 border-green-700/50' : 'bg-slate-900/60 border-slate-700 hover:border-slate-600'
+                                                 }`}
+                                                 onClick={() => toggleCloseItem(wi.id)}>
+                                                <div className={`w-5 h-5 rounded flex items-center justify-center flex-shrink-0 ${
+                                                    closingItems.has(wi.id) ? 'bg-green-600 text-white' : 'border-2 border-slate-500'
+                                                }`}>
+                                                    {closingItems.has(wi.id) && <span className="text-xs">✓</span>}
+                                                </div>
+                                                <div className="flex-1">
+                                                    <span className="text-indigo-400 font-mono text-xs mr-2">{wi.id}</span>
+                                                    <span className="text-sm text-slate-200">{wi.title}</span>
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                ) : (
+                                    <div className="text-sm text-slate-500 text-center py-4">No work items linked to this session.</div>
+                                )}
+                                
+                                <div className="flex justify-between pt-2">
+                                    <button onClick={() => setStep(3)} className="px-4 py-2 text-slate-400 hover:text-white text-sm">← Back</button>
+                                    <div className="flex gap-2">
+                                        <button onClick={onClose} className="px-4 py-2 text-slate-400 hover:text-white text-sm">Skip</button>
+                                        <button onClick={handleCloseItems} disabled={saving || closingItems.size === 0}
+                                            className={`px-4 py-2 rounded-lg text-sm font-medium ${
+                                                closingItems.size > 0 ? 'bg-green-600 hover:bg-green-500 text-white' : 'bg-slate-700 text-slate-500 cursor-not-allowed'
+                                            }`}>
+                                            {saving ? 'Saving...' : `✅ Complete ${closingItems.size} Item${closingItems.size !== 1 ? 's' : ''}`}
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                </div>
+            </div>
+        );
+    }
+    
+    function SessionHistoryPanel({ sessions, workItems, apps, deployments, firebaseUid, config, showAlert, onStartReview }) {
         const [filterApp, setFilterApp] = React.useState('all');
         const [filterType, setFilterType] = React.useState('all');
         const [expandedSession, setExpandedSession] = React.useState(null);
@@ -16972,7 +17487,8 @@ The deploy will appear in Command Center's Session tab for one-click deployment.
         
         const totalSessions = sessions.length;
         const completedSessions = sessions.filter(s => s.status === 'completed').length;
-        const activeSessions = sessions.filter(s => s.status === 'prep' || s.status === 'active').length;
+        const activeSessions = sessions.filter(s => s.status === 'prep' || s.status === 'active' || s.status === 'review').length;
+        const reviewSessions = sessions.filter(s => s.status === 'prep' || s.status === 'review');
         
         const typeColor = (type) => {
             const meta = SESSION_TYPE_META[type] || { color: 'slate' };
@@ -17004,6 +17520,38 @@ The deploy will appear in Command Center's Session tab for one-click deployment.
         
         return (
             <div className="space-y-4">
+                {/* Awaiting Review Banner (Phase 3) */}
+                {reviewSessions.length > 0 && onStartReview && (
+                    <div className="bg-indigo-900/30 border border-indigo-700/50 rounded-xl p-4">
+                        <div className="flex items-center justify-between mb-2">
+                            <div className="text-sm font-semibold text-indigo-200">
+                                📋 {reviewSessions.length} session{reviewSessions.length !== 1 ? 's' : ''} awaiting review
+                            </div>
+                        </div>
+                        <div className="space-y-2">
+                            {reviewSessions.slice(0, 3).map(s => {
+                                const appName = apps[s.appId]?.name || s.appId;
+                                const appIcon = apps[s.appId]?.icon || '📦';
+                                return (
+                                    <div key={s.id} className="flex items-center justify-between bg-slate-800/60 rounded-lg px-3 py-2">
+                                        <div className="flex items-center gap-2 text-sm">
+                                            <span>{appIcon}</span>
+                                            <span className="text-slate-200">{appName}</span>
+                                            <span className={`text-xs px-1.5 py-0.5 rounded ${typeColor(s.type)}`}>{s.type}</span>
+                                            <span className="text-xs text-slate-500">{new Date(s.createdAt).toLocaleDateString()}</span>
+                                        </div>
+                                        <button 
+                                            onClick={() => onStartReview(s)}
+                                            className="text-xs px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg font-medium transition-colors">
+                                            Review →
+                                        </button>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    </div>
+                )}
+                
                 {/* Stats Row */}
                 <div className="grid grid-cols-3 gap-3">
                     <div className="bg-slate-800 rounded-lg border border-slate-700 p-3 text-center">
@@ -17083,23 +17631,42 @@ The deploy will appear in Command Center's Session tab for one-click deployment.
                                                     ? 'bg-green-900/40 text-green-300' 
                                                     : session.status === 'abandoned'
                                                         ? 'bg-red-900/40 text-red-300'
-                                                        : 'bg-amber-900/40 text-amber-300'
+                                                        : session.status === 'review'
+                                                            ? 'bg-purple-900/40 text-purple-300'
+                                                            : 'bg-amber-900/40 text-amber-300'
                                             }`}>
                                                 {session.status === 'completed' ? '✓ Deployed' 
                                                     : session.status === 'abandoned' ? '✕ Abandoned' 
+                                                    : session.status === 'review' ? '📋 In Review'
                                                     : '⏳ ' + (session.status || 'prep')}
                                             </span>
+                                            {(session.status === 'prep' || session.status === 'review') && onStartReview && (
+                                                <button 
+                                                    onClick={(e) => { e.stopPropagation(); onStartReview(session); }}
+                                                    className="text-xs px-2.5 py-1 bg-indigo-600 hover:bg-indigo-500 text-white rounded-full font-medium transition-colors">
+                                                    {session.status === 'review' ? 'Continue Review' : 'Review Session'}
+                                                </button>
+                                            )}
                                             <span className={`text-slate-500 transition-transform ${isExpanded ? 'rotate-180' : ''}`}>▾</span>
                                         </div>
                                     </div>
                                     
-                                    {linkedDeploy && !isExpanded && (
+                                    {!isExpanded && (linkedDeploy || session.status === 'prep' || session.status === 'review') && (
                                         <div className="flex items-center gap-2 mt-2 text-xs text-slate-500">
                                             <span>📦 Prep</span>
                                             <span className="flex-1 border-t border-dashed border-slate-600"></span>
                                             <span>→</span>
+                                            {session.review && (
+                                                <>
+                                                    <span className={session.review.allMet ? 'text-green-400' : 'text-amber-400'}>📋 {session.review.allMet ? '✓' : '⚠'}</span>
+                                                    <span>→</span>
+                                                </>
+                                            )}
                                             <span className="flex-1 border-t border-dashed border-slate-600"></span>
-                                            <span>🚀 v{linkedDeploy.version} {linkedDeploy.target?.toUpperCase()}</span>
+                                            {linkedDeploy 
+                                                ? <span>🚀 v{linkedDeploy.version} {linkedDeploy.target?.toUpperCase()}</span>
+                                                : <span className="text-slate-600">⏳ Deploy</span>
+                                            }
                                         </div>
                                     )}
                                 </div>
@@ -17108,10 +17675,25 @@ The deploy will appear in Command Center's Session tab for one-click deployment.
                                 {isExpanded && (
                                     <div className="border-t border-slate-700 p-4 bg-slate-900/40 space-y-3">
                                         {/* Session Flow */}
-                                        <div className="flex items-center gap-2 text-sm">
+                                        <div className="flex items-center gap-2 text-sm flex-wrap">
                                             <div className="flex items-center gap-1 px-2 py-1 bg-indigo-900/30 rounded border border-indigo-800/40">
                                                 <span>📦</span>
-                                                <span className="text-indigo-300">Prep Generated</span>
+                                                <span className="text-indigo-300">Prep</span>
+                                            </div>
+                                            <span className="text-slate-600">→</span>
+                                            <div className={`flex items-center gap-1 px-2 py-1 rounded border ${
+                                                session.review 
+                                                    ? 'bg-purple-900/30 border-purple-800/40' 
+                                                    : session.status === 'review'
+                                                        ? 'bg-purple-900/30 border-purple-800/40 border-dashed animate-pulse'
+                                                        : 'bg-slate-800 border-slate-700 border-dashed'
+                                            }`}>
+                                                <span>{session.review ? '📋' : '⏳'}</span>
+                                                <span className={session.review ? 'text-purple-300' : 'text-slate-500'}>
+                                                    {session.review ? (session.review.allMet ? 'Verified ✓' : 'Reviewed') 
+                                                        : session.status === 'review' ? 'Reviewing...'
+                                                        : 'Review'}
+                                                </span>
                                             </div>
                                             <span className="text-slate-600">→</span>
                                             <div className={`flex items-center gap-1 px-2 py-1 rounded border ${
@@ -17122,8 +17704,8 @@ The deploy will appear in Command Center's Session tab for one-click deployment.
                                                 <span>{linkedDeploy ? '🚀' : '⏳'}</span>
                                                 <span className={linkedDeploy ? 'text-green-300' : 'text-slate-500'}>
                                                     {linkedDeploy 
-                                                        ? `Deployed v${linkedDeploy.version} → ${linkedDeploy.target?.toUpperCase()}`
-                                                        : 'Awaiting deploy'}
+                                                        ? `v${linkedDeploy.version} → ${linkedDeploy.target?.toUpperCase()}`
+                                                        : 'Deploy'}
                                                 </span>
                                             </div>
                                         </div>
@@ -17198,6 +17780,30 @@ The deploy will appear in Command Center's Session tab for one-click deployment.
                                             <div>
                                                 <div className="text-xs text-slate-500 mb-1">Notes</div>
                                                 <div className="text-sm text-slate-300">{session.notes}</div>
+                                            </div>
+                                        )}
+                                        
+                                        {/* Phase 3: Deliverables summary */}
+                                        {session.deliverables?.summary && (
+                                            <div>
+                                                <div className="text-xs text-slate-500 mb-1">Deliverables</div>
+                                                <div className="text-sm text-slate-300">{session.deliverables.summary}</div>
+                                            </div>
+                                        )}
+                                        
+                                        {/* Phase 3: Review Results */}
+                                        {session.review && (
+                                            <div>
+                                                <div className="text-xs text-slate-500 mb-1">Review</div>
+                                                <div className={`text-sm px-3 py-2 rounded-lg border ${
+                                                    session.review.allMet ? 'bg-green-900/20 border-green-700/50 text-green-200' : 'bg-amber-900/20 border-amber-700/50 text-amber-200'
+                                                }`}>
+                                                    {session.review.allMet ? '✅ All criteria met' : `⚠️ ${(session.review.criteriaResults || []).filter(c => c.met).length}/${(session.review.criteriaResults || []).length} criteria met`}
+                                                    {session.review.reviewedBy && <span className="text-xs ml-2 opacity-60">by {session.review.reviewedBy}</span>}
+                                                </div>
+                                                {session.review.notes && (
+                                                    <div className="text-xs text-slate-400 mt-1">{session.review.notes}</div>
+                                                )}
                                             </div>
                                         )}
                                     </div>
@@ -23552,6 +24158,9 @@ ${repoStr || '- *No repos configured*'}
                         if (newSession) {
                             setSessionRecord(newSession);
                             addLog(`\ud83d\udcdd Session ${newSession.id} recorded`, 'success');
+                            // Phase 3.4: Log session creation
+                            const actor = config?.ownerName || 'Owner';
+                            ActivityLogService.logSessionCreate(firebaseUid, actor, app.name, sessionType || 'build', newSession.id).catch(() => {});
                         }
                     } catch (e) {
                         addLog(`\u26a0\ufe0f Could not create session record: ${e.message}`, 'warn');
