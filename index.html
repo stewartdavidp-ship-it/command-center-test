@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Command Center</title>
-    <meta name="version" content="8.40.0">
+    <meta name="version" content="8.41.0">
     <meta name="gs-app-id" content="command-center">
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -7392,39 +7392,40 @@
                             </div>
                         </div>
                         
-                        {/* Quick Actions Bar */}
+                        {/* Quick Actions Bar (Phase 4.2) */}
                         <div className="mt-3 pt-3 border-t border-slate-700 flex items-center gap-2 flex-wrap">
                             <span className="text-xs text-slate-500 mr-2">⚡ Quick:</span>
                             <button
-                                onClick={() => setModal({ type: 'deployAll' })}
-                                disabled={stagedFiles.length === 0}
-                                className="px-3 py-1 text-xs bg-green-600 hover:bg-green-500 disabled:opacity-40 disabled:hover:bg-green-600 rounded-full font-medium transition-colors"
+                                onClick={() => setView('backlog')}
+                                className="px-3 py-1 text-xs bg-indigo-600 hover:bg-indigo-500 rounded-full font-medium transition-colors"
                             >
-                                🚀 Deploy All ({stagedFiles.filter(f => f.fileAction !== 'push-doc').length}{stagedFiles.some(f => f.fileAction === 'push-doc') ? ` + ${stagedFiles.filter(f => f.fileAction === 'push-doc').length} docs` : ''})
+                                💡 Add Idea
                             </button>
                             <button
+                                onClick={() => setView('smartdeploy')}
+                                className="px-3 py-1 text-xs bg-green-600 hover:bg-green-500 rounded-full font-medium transition-colors"
+                            >
+                                🚀 Smart Deploy
+                            </button>
+                            {stagedFiles.length > 0 && (
+                                <button
+                                    onClick={() => setModal({ type: 'deployAll' })}
+                                    className="px-3 py-1 text-xs bg-green-700 hover:bg-green-600 rounded-full font-medium transition-colors"
+                                >
+                                    📦 Deploy Staged ({stagedFiles.filter(f => f.fileAction !== 'push-doc').length})
+                                </button>
+                            )}
+                            <button
                                 onClick={() => setModal({ type: 'syncEnvs' })}
-                                className="px-3 py-1 text-xs bg-blue-600 hover:bg-blue-500 rounded-full font-medium transition-colors"
+                                className="px-3 py-1 text-xs bg-slate-700 hover:bg-slate-600 rounded-full font-medium transition-colors"
                             >
                                 🔄 Sync TEST→PROD
                             </button>
                             <button
-                                onClick={() => setModal({ type: 'versionBump' })}
-                                className="px-3 py-1 text-xs bg-purple-600 hover:bg-purple-500 rounded-full font-medium transition-colors"
-                            >
-                                📈 Bump Versions
-                            </button>
-                            <button
-                                onClick={() => setView('integrations')}
+                                onClick={() => setView('portfolio')}
                                 className="px-3 py-1 text-xs bg-slate-700 hover:bg-slate-600 rounded-full font-medium transition-colors"
                             >
-                                💚 Health Check
-                            </button>
-                            <button
-                                onClick={() => { setView('cleanup'); }}
-                                className="px-3 py-1 text-xs bg-slate-700 hover:bg-slate-600 rounded-full font-medium transition-colors"
-                            >
-                                🧹 Cleanup Scan
+                                📊 Portfolio
                             </button>
                             
                             {/* Status indicators */}
@@ -7596,6 +7597,11 @@
                             showPrompt={showPrompt}
                             globalIssues={globalIssues}
                             globalWorkItems={globalWorkItems}
+                            globalSessions={globalSessions}
+                            globalActivity={globalActivity}
+                            deployments={deployments}
+                            firebaseUid={firebaseUid}
+                            setModal={setModal}
                             linkIssuesToVersion={linkIssuesToVersion}
                             setView={setView}
                             rollbackSnapshots={rollbackSnapshots}
@@ -8553,7 +8559,7 @@
     // DASHBOARD VIEW
     // =========================================================================
     
-    function DashboardView({ apps, config, stagedFiles, setStagedFiles, github, onFileDrop, onRemove, onDeploy, onBatchDeploy, onPromote, activeDeployments, removeActiveDeployment, refreshing, onUpdateStagedFile, deployingRepos, showConfirm, showAlert, showPrompt, globalIssues, globalWorkItems, linkIssuesToVersion, setView, rollbackSnapshots, onQuickRollback }) {
+    function DashboardView({ apps, config, stagedFiles, setStagedFiles, github, onFileDrop, onRemove, onDeploy, onBatchDeploy, onPromote, activeDeployments, removeActiveDeployment, refreshing, onUpdateStagedFile, deployingRepos, showConfirm, showAlert, showPrompt, globalIssues, globalWorkItems, globalSessions, globalActivity, deployments, firebaseUid, setModal, linkIssuesToVersion, setView, rollbackSnapshots, onQuickRollback }) {
         const [selectedFileIds, setSelectedFileIds] = React.useState(new Set());
         const [deployTarget, setDeployTarget] = React.useState({ appId: 'command-center', target: 'test' });
         const [isDeploying, setIsDeploying] = React.useState(false);
@@ -8884,6 +8890,73 @@
         
         const selectAll = () => setSelectedFileIds(new Set(stagedFiles.map(f => f.id)));
         const selectNone = () => setSelectedFileIds(new Set());
+        
+        // === Phase 4.1: Product Health Metrics ===
+        const productMetrics = React.useMemo(() => {
+            const items = globalWorkItems || [];
+            const sessions = globalSessions || [];
+            const deps = deployments || [];
+            const now = Date.now();
+            const thirtyDaysAgo = now - (30 * 24 * 60 * 60 * 1000);
+            
+            // Features shipped this month (done items in last 30 days)
+            const shippedThisMonth = items.filter(wi => {
+                if (wi.status !== 'done') return false;
+                const completedAt = wi.completedAt || wi.updatedAt;
+                return completedAt && new Date(completedAt).getTime() > thirtyDaysAgo;
+            });
+            
+            // Pipeline health: items in each active stage
+            const pipeline = { idea: 0, ready: 0, 'in-progress': 0, review: 0 };
+            const staleItems = [];
+            items.forEach(wi => {
+                if (pipeline.hasOwnProperty(wi.status)) pipeline[wi.status]++;
+                if (WorkItemService.isStale && WorkItemService.isStale(wi)) staleItems.push(wi);
+            });
+            
+            // Session readiness: apps with ready items that have acceptance criteria
+            const readyByApp = {};
+            items.filter(wi => wi.status === 'ready').forEach(wi => {
+                if (!readyByApp[wi.appId]) readyByApp[wi.appId] = { count: 0, withCriteria: 0 };
+                readyByApp[wi.appId].count++;
+                if (wi.acceptanceCriteria?.length > 0) readyByApp[wi.appId].withCriteria++;
+            });
+            const readyApps = Object.entries(readyByApp)
+                .map(([appId, data]) => ({ appId, ...data, app: apps[appId] }))
+                .filter(a => a.app)
+                .sort((a, b) => b.withCriteria - a.withCriteria || b.count - a.count);
+            
+            // Cost per feature (sessions in last 30 days)
+            const recentSessions = sessions.filter(s => new Date(s.createdAt).getTime() > thirtyDaysAgo);
+            let totalCost = 0;
+            recentSessions.forEach(s => {
+                const tokens = s.packageTokens || 0;
+                const engineId = s.engineId || 'claude-sonnet-4.5';
+                const engine = EngineRegistryService.ENGINES[engineId];
+                if (engine && tokens > 0) {
+                    const inputCost = (tokens / 1000000) * engine.cost.input;
+                    const outputCost = ((tokens * 0.3) / 1000000) * engine.cost.output;
+                    totalCost += inputCost + outputCost;
+                }
+            });
+            const costPerFeature = shippedThisMonth.length > 0 ? totalCost / shippedThisMonth.length : 0;
+            
+            // Recent deploys count
+            const recentDeploys = deps.filter(d => new Date(d.timestamp || d.date).getTime() > thirtyDaysAgo);
+            
+            // In-progress sessions (sessions without deploy link)
+            const activeSessions = sessions.filter(s => s.status === 'prep' || s.status === 'active');
+            
+            return { 
+                shippedThisMonth, pipeline, staleItems, readyApps, 
+                recentSessions, totalCost, costPerFeature, 
+                recentDeploys, activeSessions,
+                totalActive: pipeline.idea + pipeline.ready + pipeline['in-progress'] + pipeline.review
+            };
+        }, [globalWorkItems, globalSessions, deployments, apps]);
+        
+        // Most-ready app for quick session action
+        const mostReadyApp = productMetrics.readyApps[0];
         
         return (
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -9613,14 +9686,253 @@
                     )}
                 </div>
                 
-                {/* Right Column - Pipeline */}
+                {/* Right Column - Product Health (Phase 4.1) */}
                 <div className="space-y-6">
+                    {/* Phase 4.1: Product Health Summary */}
                     <div className="bg-slate-800 rounded-xl border border-slate-700 p-4">
-                        <h3 className="font-semibold mb-3 flex items-center gap-2">
-                            <Icons.Shield className="text-green-400" /> Pipeline
-                            {refreshing && <div className="w-3 h-3 border border-indigo-400 border-t-transparent rounded-full animate-spin" />}
+                        <h3 className="font-semibold mb-3 flex items-center gap-2 text-sm">
+                            🏥 Product Health
+                            <span className="text-xs text-slate-500 font-normal ml-auto">Last 30 days</span>
                         </h3>
-                        <div className="space-y-3">
+                        <div className="grid grid-cols-2 gap-3 mb-3">
+                            <div className="bg-green-900/20 border border-green-800/30 rounded-lg p-3 text-center">
+                                <div className="text-2xl font-bold text-green-400">{productMetrics.shippedThisMonth.length}</div>
+                                <div className="text-xs text-slate-400">Features Shipped</div>
+                            </div>
+                            <div className="bg-indigo-900/20 border border-indigo-800/30 rounded-lg p-3 text-center">
+                                <div className="text-2xl font-bold text-indigo-400">{productMetrics.totalActive}</div>
+                                <div className="text-xs text-slate-400">In Pipeline</div>
+                            </div>
+                            <div className="bg-blue-900/20 border border-blue-800/30 rounded-lg p-3 text-center group relative">
+                                <div className="text-2xl font-bold text-blue-400">{productMetrics.readyApps.length}</div>
+                                <div className="text-xs text-slate-400">Apps Session-Ready</div>
+                                {/* Progressive disclosure tooltip */}
+                                {productMetrics.readyApps.length > 0 && (
+                                    <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:block z-20 w-48">
+                                        <div className="bg-slate-900 border border-slate-600 rounded-lg p-2 text-xs text-left shadow-xl">
+                                            {productMetrics.readyApps.slice(0, 5).map(ra => (
+                                                <div key={ra.appId} className="flex items-center gap-1.5 py-0.5">
+                                                    <AppIcon icon={ra.app?.icon} size={14} />
+                                                    <span className="text-slate-300">{ra.app?.name}</span>
+                                                    <span className="text-slate-500 ml-auto">{ra.withCriteria}/{ra.count} ready</span>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                            <div className="bg-slate-700/50 border border-slate-600/30 rounded-lg p-3 text-center group relative">
+                                <div className="text-2xl font-bold text-slate-300">{productMetrics.costPerFeature > 0 ? `$${productMetrics.costPerFeature.toFixed(2)}` : '—'}</div>
+                                <div className="text-xs text-slate-400">Cost / Feature</div>
+                                {/* Progressive disclosure tooltip */}
+                                <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:block z-20 w-52">
+                                    <div className="bg-slate-900 border border-slate-600 rounded-lg p-2 text-xs text-left shadow-xl">
+                                        <div className="flex justify-between py-0.5"><span className="text-slate-400">Sessions</span><span>{productMetrics.recentSessions.length}</span></div>
+                                        <div className="flex justify-between py-0.5"><span className="text-slate-400">Total cost</span><span>${productMetrics.totalCost.toFixed(2)}</span></div>
+                                        <div className="flex justify-between py-0.5"><span className="text-slate-400">Deploys</span><span>{productMetrics.recentDeploys.length}</span></div>
+                                        <div className="flex justify-between py-0.5"><span className="text-slate-400">Features done</span><span>{productMetrics.shippedThisMonth.length}</span></div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        {/* Stale warning */}
+                        {productMetrics.staleItems.length > 0 && (
+                            <div className="flex items-center gap-2 text-xs text-amber-400 bg-amber-900/20 rounded-lg px-3 py-2">
+                                ⚠️ {productMetrics.staleItems.length} item{productMetrics.staleItems.length !== 1 ? 's' : ''} stale (7+ days in-progress)
+                            </div>
+                        )}
+                    </div>
+                    
+                    {/* Phase 4.2: Smart Quick Actions */}
+                    <div className="bg-slate-800 rounded-xl border border-slate-700 p-4">
+                        <h3 className="font-semibold mb-3 text-sm">⚡ Quick Actions</h3>
+                        <div className="space-y-2">
+                            {/* Start Session - links to most-ready app */}
+                            <button
+                                onClick={() => {
+                                    if (mostReadyApp) {
+                                        setView('projects');
+                                        // Trigger Claude Prep for the most ready app
+                                        setTimeout(() => {
+                                            setModal({ type: 'claudePrep', data: { appId: mostReadyApp.appId } });
+                                        }, 100);
+                                    } else {
+                                        setView('backlog');
+                                    }
+                                }}
+                                className="w-full flex items-center gap-3 p-3 bg-indigo-600/20 border border-indigo-500/30 hover:bg-indigo-600/30 rounded-lg text-left transition-colors group"
+                            >
+                                <span className="text-lg">🤖</span>
+                                <div className="flex-1">
+                                    <div className="text-sm font-medium text-indigo-300">Start Session</div>
+                                    <div className="text-xs text-slate-400">
+                                        {mostReadyApp 
+                                            ? `${mostReadyApp.app?.name} — ${mostReadyApp.withCriteria} item${mostReadyApp.withCriteria !== 1 ? 's' : ''} ready`
+                                            : 'No items ready — add work items first'}
+                                    </div>
+                                </div>
+                                <span className="text-slate-500 group-hover:text-indigo-400 transition-colors">→</span>
+                            </button>
+                            
+                            {/* Add Idea */}
+                            <button
+                                onClick={() => setView('backlog')}
+                                className="w-full flex items-center gap-3 p-3 bg-slate-700/50 hover:bg-slate-700 rounded-lg text-left transition-colors group"
+                            >
+                                <span className="text-lg">💡</span>
+                                <div className="flex-1">
+                                    <div className="text-sm font-medium">Add Idea</div>
+                                    <div className="text-xs text-slate-400">Capture a new feature or improvement</div>
+                                </div>
+                                <span className="text-slate-500 group-hover:text-white transition-colors">→</span>
+                            </button>
+                            
+                            {/* Review - show if sessions need review */}
+                            {productMetrics.activeSessions.length > 0 && (
+                                <button
+                                    onClick={() => setView('session')}
+                                    className="w-full flex items-center gap-3 p-3 bg-purple-900/20 border border-purple-500/20 hover:bg-purple-900/30 rounded-lg text-left transition-colors group"
+                                >
+                                    <span className="text-lg">📝</span>
+                                    <div className="flex-1">
+                                        <div className="text-sm font-medium text-purple-300">Review Session</div>
+                                        <div className="text-xs text-slate-400">{productMetrics.activeSessions.length} session{productMetrics.activeSessions.length !== 1 ? 's' : ''} awaiting review</div>
+                                    </div>
+                                    <span className="text-slate-500 group-hover:text-purple-400 transition-colors">→</span>
+                                </button>
+                            )}
+                            
+                            {/* Deploy */}
+                            <button
+                                onClick={() => setView('smartdeploy')}
+                                className="w-full flex items-center gap-3 p-3 bg-slate-700/50 hover:bg-slate-700 rounded-lg text-left transition-colors group"
+                            >
+                                <span className="text-lg">🚀</span>
+                                <div className="flex-1">
+                                    <div className="text-sm font-medium">Smart Deploy</div>
+                                    <div className="text-xs text-slate-400">Deploy from archive package</div>
+                                </div>
+                                <span className="text-slate-500 group-hover:text-white transition-colors">→</span>
+                            </button>
+                        </div>
+                    </div>
+                    
+                    {/* Pipeline Health (Phase 4.1 — progressive disclosure) */}
+                    <div className="bg-slate-800 rounded-xl border border-slate-700 p-4">
+                        <h3 className="font-semibold mb-3 flex items-center gap-2 text-sm">
+                            📋 Pipeline
+                            <button 
+                                onClick={() => setView('backlog')}
+                                className="ml-auto text-xs text-indigo-400 hover:text-indigo-300">
+                                View All →
+                            </button>
+                        </h3>
+                        {/* Pipeline bar */}
+                        {productMetrics.totalActive > 0 ? (
+                            <div className="mb-3">
+                                <div className="h-4 rounded-full overflow-hidden flex bg-slate-700">
+                                    {[
+                                        { key: 'idea', label: 'Ideas', count: productMetrics.pipeline.idea, color: '#64748b' },
+                                        { key: 'ready', label: 'Ready', count: productMetrics.pipeline.ready, color: '#3b82f6' },
+                                        { key: 'in-progress', label: 'In Progress', count: productMetrics.pipeline['in-progress'], color: '#f59e0b' },
+                                        { key: 'review', label: 'Review', count: productMetrics.pipeline.review, color: '#a855f7' },
+                                    ].filter(s => s.count > 0).map(s => (
+                                        <div key={s.key} 
+                                            style={{ width: `${(s.count / productMetrics.totalActive) * 100}%`, backgroundColor: s.color }}
+                                            className="h-full flex items-center justify-center text-[10px] font-medium text-white/90 min-w-[18px]"
+                                            title={`${s.label}: ${s.count}`}>
+                                            {(s.count / productMetrics.totalActive) > 0.12 ? s.count : ''}
+                                        </div>
+                                    ))}
+                                </div>
+                                <div className="flex flex-wrap gap-3 mt-2 text-xs">
+                                    {Object.entries(productMetrics.pipeline).filter(([_, v]) => v > 0).map(([status, count]) => {
+                                        const colors = { idea: 'text-slate-400', ready: 'text-blue-400', 'in-progress': 'text-amber-400', review: 'text-purple-400' };
+                                        return (
+                                            <span key={status} className={colors[status] || 'text-slate-400'}>
+                                                {status === 'in-progress' ? 'WIP' : status.charAt(0).toUpperCase() + status.slice(1)}: {count}
+                                            </span>
+                                        );
+                                    })}
+                                </div>
+                            </div>
+                        ) : (
+                            <div className="text-xs text-slate-500 py-2">No active work items in pipeline</div>
+                        )}
+                        {/* Active work items list */}
+                        <div className="space-y-1">
+                            {(globalWorkItems || [])
+                                .filter(i => i.status === 'in-progress' || i.status === 'review' || i.status === 'ready')
+                                .slice(0, 5)
+                                .map(item => {
+                                    const app = Object.values(apps).find(a => a.id === item.appId);
+                                    const statusColors = {
+                                        'in-progress': 'bg-amber-900/50 text-amber-300',
+                                        review: 'bg-purple-900/50 text-purple-300',
+                                        ready: 'bg-blue-900/50 text-blue-300'
+                                    };
+                                    return (
+                                        <div key={item.id} className="flex items-center gap-2 text-sm p-2 bg-slate-700/50 rounded">
+                                            {app && <AppIcon icon={app.icon} size={14} />}
+                                            <span className="flex-1 truncate text-xs">{item.title}</span>
+                                            <span className={`px-1.5 py-0.5 rounded text-[10px] ${statusColors[item.status] || 'bg-slate-700 text-slate-300'}`}>
+                                                {item.status === 'in-progress' ? 'WIP' : item.status}
+                                            </span>
+                                        </div>
+                                    );
+                                })
+                            }
+                        </div>
+                    </div>
+                    
+                    {/* Recent Activity (Phase 4.1) */}
+                    {(globalActivity || []).length > 0 && (
+                        <div className="bg-slate-800 rounded-xl border border-slate-700 p-4">
+                            <h3 className="font-semibold mb-3 flex items-center gap-2 text-sm">
+                                📡 Recent Activity
+                                <button 
+                                    onClick={() => setView('session')}
+                                    className="ml-auto text-xs text-indigo-400 hover:text-indigo-300">
+                                    Full Log →
+                                </button>
+                            </h3>
+                            <div className="space-y-2">
+                                {(globalActivity || []).slice(0, 6).map(evt => {
+                                    const actionIcons = {
+                                        deploy: '🚀', session_create: '🤖', session_complete: '✅',
+                                        item_transition: '📋', review: '📝', scope: '🎯'
+                                    };
+                                    const timeAgo = (() => {
+                                        const diff = Date.now() - new Date(evt.timestamp).getTime();
+                                        const mins = Math.floor(diff / 60000);
+                                        if (mins < 1) return 'now';
+                                        if (mins < 60) return `${mins}m`;
+                                        const hrs = Math.floor(mins / 60);
+                                        if (hrs < 24) return `${hrs}h`;
+                                        return `${Math.floor(hrs / 24)}d`;
+                                    })();
+                                    return (
+                                        <div key={evt.id} className="flex items-start gap-2 text-xs">
+                                            <span>{actionIcons[evt.action] || '•'}</span>
+                                            <span className="flex-1 text-slate-300 leading-relaxed">{evt.summary}</span>
+                                            <span className="text-slate-500 whitespace-nowrap">{timeAgo}</span>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        </div>
+                    )}
+                    
+                    {/* App Pipeline — Collapsed by default (Phase 4.3 progressive disclosure: detail tier) */}
+                    <details className="bg-slate-800 rounded-xl border border-slate-700 overflow-hidden">
+                        <summary className="p-4 cursor-pointer hover:bg-slate-700/50 flex items-center gap-2 text-sm font-semibold select-none">
+                            <Icons.Shield className="text-green-400" /> App Pipeline
+                            {refreshing && <div className="w-3 h-3 border border-indigo-400 border-t-transparent rounded-full animate-spin ml-1" />}
+                            <span className="ml-auto text-xs text-slate-500 font-normal">
+                                {Object.values(apps).filter(a => a.testRepo || a.prodRepo).length} apps
+                            </span>
+                        </summary>
+                        <div className="px-4 pb-4 space-y-3">
                             {/* v8.8.0: Project-based grouping */}
                             {projects.filter(proj => {
                                 const projDef = config?.projects?.[proj.id];
@@ -9798,128 +10110,72 @@
                             })}
                             {configuredApps.length === 0 && <div className="text-slate-400 text-sm">Add token in Settings</div>}
                         </div>
-                    </div>
+                    </details>
                     
-                    {/* Issues Summary Widget */}
-                    {globalIssues.length > 0 && (
-                        <div className="bg-slate-800 rounded-xl border border-slate-700 p-4">
-                            <h3 className="font-semibold mb-3 flex items-center gap-2">
+                    {/* Issues - Demoted below fold (Phase 4.1) */}
+                    {globalIssues.filter(i => i.status === 'open' || i.status === 'in-progress').length > 0 && (
+                        <details className="bg-slate-800 rounded-xl border border-slate-700 overflow-hidden">
+                            <summary className="p-4 cursor-pointer hover:bg-slate-700/50 flex items-center gap-2 text-sm font-semibold select-none">
                                 <Icons.AlertCircle className="text-red-400" /> Issues
+                                <span className="ml-auto text-xs font-normal">
+                                    <span className="text-red-400">{globalIssues.filter(i => i.status === 'open').length} open</span>
+                                    {globalIssues.filter(i => i.status === 'in-progress').length > 0 && (
+                                        <span className="text-amber-400 ml-2">{globalIssues.filter(i => i.status === 'in-progress').length} WIP</span>
+                                    )}
+                                </span>
+                            </summary>
+                            <div className="px-4 pb-4">
+                                <div className="space-y-1">
+                                    {globalIssues
+                                        .filter(i => i.status === 'open' || i.status === 'in-progress')
+                                        .slice(0, 5)
+                                        .map(issue => (
+                                            <div key={issue.id} className="flex items-center gap-2 text-sm p-2 bg-slate-700/50 rounded">
+                                                <span className="font-mono text-xs text-indigo-400">{issue.id}</span>
+                                                <span className="flex-1 truncate text-xs">{issue.title}</span>
+                                                <span className={`w-2 h-2 rounded-full ${
+                                                    issue.status === 'open' ? 'bg-red-500' : 'bg-yellow-500'
+                                                }`} />
+                                            </div>
+                                        ))
+                                    }
+                                </div>
                                 <button 
                                     onClick={() => setView('issues')}
-                                    className="ml-auto text-xs text-indigo-400 hover:text-indigo-300">
-                                    View All →
+                                    className="mt-2 text-xs text-indigo-400 hover:text-indigo-300">
+                                    View All Issues →
                                 </button>
-                            </h3>
-                            <div className="grid grid-cols-4 gap-2 text-center mb-3">
-                                <div className="bg-red-900/30 rounded p-2">
-                                    <div className="text-lg font-bold text-red-400">
-                                        {globalIssues.filter(i => i.status === 'open').length}
-                                    </div>
-                                    <div className="text-xs text-slate-400">Open</div>
-                                </div>
-                                <div className="bg-yellow-900/30 rounded p-2">
-                                    <div className="text-lg font-bold text-yellow-400">
-                                        {globalIssues.filter(i => i.status === 'in-progress').length}
-                                    </div>
-                                    <div className="text-xs text-slate-400">WIP</div>
-                                </div>
-                                <div className="bg-blue-900/30 rounded p-2">
-                                    <div className="text-lg font-bold text-blue-400">
-                                        {globalIssues.filter(i => i.status === 'fixed').length}
-                                    </div>
-                                    <div className="text-xs text-slate-400">Fixed</div>
-                                </div>
-                                <div className="bg-green-900/30 rounded p-2">
-                                    <div className="text-lg font-bold text-green-400">
-                                        {globalIssues.filter(i => i.status === 'verified').length}
-                                    </div>
-                                    <div className="text-xs text-slate-400">Verified</div>
-                                </div>
                             </div>
-                            {/* Recent open issues */}
-                            <div className="space-y-1">
-                                {globalIssues
-                                    .filter(i => i.status === 'open' || i.status === 'in-progress')
-                                    .slice(0, 3)
-                                    .map(issue => (
-                                        <div key={issue.id} className="flex items-center gap-2 text-sm p-2 bg-slate-700/50 rounded">
-                                            <span className="font-mono text-xs text-indigo-400">{issue.id}</span>
-                                            <span className="flex-1 truncate">{issue.title}</span>
-                                            <span className={`w-2 h-2 rounded-full ${
-                                                issue.status === 'open' ? 'bg-red-500' : 'bg-yellow-500'
-                                            }`} />
-                                        </div>
-                                    ))
-                                }
-                            </div>
-                        </div>
+                        </details>
                     )}
                     
-                    {/* Backlog Summary Widget (v8.22.0) */}
-                    {(globalWorkItems || []).length > 0 && (
-                        <div className="bg-slate-800 rounded-xl border border-slate-700 p-4">
-                            <h3 className="font-semibold mb-3 flex items-center gap-2">
-                                📋 Backlog
-                                <button 
-                                    onClick={() => setView('backlog')}
-                                    className="ml-auto text-xs text-indigo-400 hover:text-indigo-300">
-                                    View All →
-                                </button>
-                            </h3>
-                            <div className="grid grid-cols-5 gap-2 text-center mb-3">
-                                <div className="bg-slate-700/50 rounded p-2">
-                                    <div className="text-lg font-bold text-slate-300">
-                                        {globalWorkItems.filter(i => i.status === 'idea').length}
-                                    </div>
-                                    <div className="text-xs text-slate-400">Ideas</div>
-                                </div>
-                                <div className="bg-blue-900/30 rounded p-2">
-                                    <div className="text-lg font-bold text-blue-400">
-                                        {globalWorkItems.filter(i => i.status === 'ready').length}
-                                    </div>
-                                    <div className="text-xs text-slate-400">Ready</div>
-                                </div>
-                                <div className="bg-amber-900/30 rounded p-2">
-                                    <div className="text-lg font-bold text-amber-400">
-                                        {globalWorkItems.filter(i => i.status === 'in-progress').length}
-                                    </div>
-                                    <div className="text-xs text-slate-400">In Progress</div>
-                                </div>
-                                <div className="bg-purple-900/30 rounded p-2">
-                                    <div className="text-lg font-bold text-purple-400">
-                                        {globalWorkItems.filter(i => i.status === 'review').length}
-                                    </div>
-                                    <div className="text-xs text-slate-400">Review</div>
-                                </div>
-                                <div className="bg-green-900/30 rounded p-2">
-                                    <div className="text-lg font-bold text-green-400">
-                                        {globalWorkItems.filter(i => i.status === 'done').length}
-                                    </div>
-                                    <div className="text-xs text-slate-400">Done</div>
-                                </div>
-                            </div>
-                            {/* Recent active items */}
-                            <div className="space-y-1">
-                                {globalWorkItems
-                                    .filter(i => i.status === 'in-progress' || i.status === 'review' || i.status === 'ready')
-                                    .slice(0, 3)
+                    {/* Backlog breakdown - Demoted below fold (Phase 4.1) */}
+                    {(globalWorkItems || []).filter(wi => wi.status === 'done').length > 0 && (
+                        <details className="bg-slate-800 rounded-xl border border-slate-700 overflow-hidden">
+                            <summary className="p-4 cursor-pointer hover:bg-slate-700/50 flex items-center gap-2 text-sm font-semibold select-none">
+                                ✅ Recently Shipped
+                                <span className="ml-auto text-xs text-green-400 font-normal">
+                                    {(globalWorkItems || []).filter(wi => wi.status === 'done').length} completed
+                                </span>
+                            </summary>
+                            <div className="px-4 pb-4 space-y-1">
+                                {(globalWorkItems || [])
+                                    .filter(wi => wi.status === 'done')
+                                    .sort((a, b) => new Date(b.completedAt || b.updatedAt || 0) - new Date(a.completedAt || a.updatedAt || 0))
+                                    .slice(0, 8)
                                     .map(item => {
                                         const app = Object.values(apps).find(a => a.id === item.appId);
                                         return (
-                                            <div key={item.id} className="flex items-center gap-2 text-sm p-2 bg-slate-700/50 rounded">
-                                                <span className="font-mono text-xs text-indigo-400">{item.id}</span>
-                                                {app && <span className="text-xs">{app.icon}</span>}
-                                                <span className="flex-1 truncate">{item.title}</span>
-                                                <span className={`px-1.5 py-0.5 rounded text-xs ${
-                                                    item.status === 'in-progress' ? 'bg-amber-900/50 text-amber-300' : item.status === 'review' ? 'bg-purple-900/50 text-purple-300' : 'bg-blue-900/50 text-blue-300'
-                                                }`}>{item.status}</span>
+                                            <div key={item.id} className="flex items-center gap-2 text-xs p-2 bg-slate-700/50 rounded">
+                                                {app && <AppIcon icon={app.icon} size={14} />}
+                                                <span className="flex-1 truncate text-slate-300">{item.title}</span>
+                                                <span className="text-green-400">✓</span>
                                             </div>
                                         );
                                     })
                                 }
                             </div>
-                        </div>
+                        </details>
                     )}
                 </div>
             </div>
@@ -10613,8 +10869,16 @@
                     </div>
                 </div>
                 
-                {/* Top Stats Row */}
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+                {/* Top Stats Row (Phase 4.1: Product-focused) */}
+                <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6">
+                    <StatCard icon="✅" label="Shipped" value={(() => {
+                        const cutoff = getTimeFilter();
+                        return (globalWorkItems || []).filter(wi => {
+                            if (wi.status !== 'done') return false;
+                            const t = new Date(wi.completedAt || wi.updatedAt || 0).getTime();
+                            return cutoff ? t > cutoff : true;
+                        }).length;
+                    })()} sub="features completed" />
                     <StatCard icon="📦" label="Apps" value={configuredApps.length} sub={`${maturityData.production} in production`} />
                     <StatCard icon="🧠" label="Sessions" value={sessionMetrics.total} sub={`${sessionMetrics.avgPerWeek}/week avg`} />
                     <StatCard icon="🚀" label="Deploys" value={deployMetrics.total} sub={`${deployMetrics.avgPerWeek}/week avg`} />
