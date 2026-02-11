@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Command Center</title>
-    <meta name="version" content="8.41.0">
+    <meta name="version" content="8.42.0">
     <meta name="gs-app-id" content="command-center">
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -7329,7 +7329,7 @@
                                 {[
                                     { id: 'deploy', icon: '🚀', label: 'Deploy', views: ['dashboard', 'smartdeploy', 'history'] },
                                     { id: 'projects', icon: '📂', label: 'Projects', views: ['projects'] },
-                                    { id: 'backlog', icon: '📋', label: 'Backlog', views: ['backlog'] },
+                                    { id: 'backlog', icon: '📋', label: 'Backlog', views: ['backlog', 'releases'] },
                                     { id: 'monitor', icon: '📊', label: 'Monitor', views: ['portfolio', 'optimize', 'domains', 'users', 'beta', 'firebase', 'integrations', 'issues'] },
                                     { id: 'maintain', icon: '🔧', label: 'Maintain', views: ['cleanup', 'files', 'archive', 'session'] },
                                     { id: 'configure', icon: '⚙️', label: 'Configure', views: ['config', 'setup', 'settings'] }
@@ -7380,6 +7380,7 @@
                                                     {v === 'archive' && '📦 Archive'}
                                                     {v === 'session' && '📝 Session Log'}
                                                     {v === 'config' && '🌍 Environments'}
+                                                    {v === 'releases' && '🚢 Releases'}
                                                     {v === 'setup' && '🆕 Setup New App'}
                                                     {v === 'settings' && '🔑 Settings'}
                                                 </button>
@@ -7772,6 +7773,10 @@
                     
                     {view === 'backlog' && (
                         <BacklogView apps={apps} showAlert={showAlert} showConfirm={showConfirm} showPrompt={showPrompt} setView={setView} config={config} />
+                    )}
+                    
+                    {view === 'releases' && (
+                        <ReleaseCoordinationView apps={apps} config={config} globalWorkItems={globalWorkItems} globalSessions={globalSessions} deployments={deployments} showAlert={showAlert} showConfirm={showConfirm} showPrompt={showPrompt} setView={setView} />
                     )}
                     
                     {view === 'config' && (
@@ -20200,6 +20205,589 @@ When complete, note: "Completes ${item.id}" in deploy notes.`;
                         showAlert={showAlert}
                         config={config}
                     />
+                )}
+            </div>
+        );
+    }
+    
+    // =========================================================================
+    // RELEASE COORDINATION VIEW — Phase 4.4 + 4.5
+    // Answers: "Is this version ready to ship?"
+    // Shows completion %, blocked items, go/no-go summary, test checklists
+    // =========================================================================
+    
+    function ReleaseCoordinationView({ apps, config, globalWorkItems, globalSessions, deployments, showAlert, showConfirm, showPrompt, setView }) {
+        const [selectedApp, setSelectedApp] = React.useState('all');
+        const [showTestChecklist, setShowTestChecklist] = React.useState(null); // appId or null
+        const [checklistState, setChecklistState] = React.useState({}); // { itemId: true/false }
+        const [expandedMilestones, setExpandedMilestones] = React.useState({});
+        
+        const configuredApps = Object.values(apps).filter(a => a.testRepo || a.prodRepo);
+        const items = globalWorkItems || [];
+        const sessions = globalSessions || [];
+        const deps = deployments || [];
+        
+        // === Build release data per app ===
+        const releaseData = React.useMemo(() => {
+            const data = {};
+            
+            for (const app of configuredApps) {
+                const appItems = items.filter(wi => wi.appId === app.id);
+                const appSessions = sessions.filter(s => s.appId === app.id);
+                const appDeploys = deps.filter(d => d.appId === app.id);
+                
+                // Group items by milestone
+                const milestones = {};
+                appItems.forEach(wi => {
+                    const ms = wi.milestone || 'unassigned';
+                    if (!milestones[ms]) milestones[ms] = { items: [], done: 0, total: 0, stale: [], blocked: [] };
+                    milestones[ms].items.push(wi);
+                    milestones[ms].total++;
+                    if (wi.status === 'done') milestones[ms].done++;
+                    if (WorkItemService.isStale && WorkItemService.isStale(wi)) milestones[ms].stale.push(wi);
+                });
+                
+                // Current versions
+                const testVer = app.versions?.test || null;
+                const prodVer = app.versions?.prod || null;
+                
+                // Recent deploys (last 5)
+                const recentDeploys = appDeploys
+                    .sort((a, b) => new Date(b.timestamp || b.date || 0) - new Date(a.timestamp || a.date || 0))
+                    .slice(0, 5);
+                
+                // Sessions pending review
+                const pendingReview = appSessions.filter(s => s.status === 'prep' || s.status === 'active' || s.status === 'review');
+                
+                // Items with unmet criteria from reviews
+                const reviewedSessions = appSessions.filter(s => s.review && !s.review.allMet);
+                
+                // Pipeline summary
+                const pipeline = { idea: 0, ready: 0, 'in-progress': 0, review: 0, done: 0 };
+                appItems.forEach(wi => { if (pipeline.hasOwnProperty(wi.status)) pipeline[wi.status]++; });
+                
+                // Overall readiness assessment
+                const activeItems = appItems.filter(wi => wi.status !== 'done' && wi.status !== 'deferred');
+                const blockers = [];
+                if (pipeline['in-progress'] > 0) blockers.push(`${pipeline['in-progress']} item${pipeline['in-progress'] > 1 ? 's' : ''} still in progress`);
+                if (pipeline.review > 0) blockers.push(`${pipeline.review} item${pipeline.review > 1 ? 's' : ''} awaiting review`);
+                const staleAll = appItems.filter(wi => WorkItemService.isStale && WorkItemService.isStale(wi));
+                if (staleAll.length > 0) blockers.push(`${staleAll.length} stale item${staleAll.length > 1 ? 's' : ''}`);
+                if (pendingReview.length > 0) blockers.push(`${pendingReview.length} session${pendingReview.length > 1 ? 's' : ''} not yet completed`);
+                
+                const totalItems = appItems.length;
+                const doneItems = pipeline.done;
+                const completionPct = totalItems > 0 ? Math.round((doneItems / totalItems) * 100) : 0;
+                
+                // Go/No-Go
+                let readiness = 'unknown';
+                if (totalItems === 0) readiness = 'no-items';
+                else if (blockers.length === 0 && completionPct === 100) readiness = 'ready';
+                else if (blockers.length === 0 && completionPct >= 80) readiness = 'almost';
+                else if (blockers.length > 0) readiness = 'blocked';
+                else readiness = 'in-progress';
+                
+                data[app.id] = {
+                    app, milestones, testVer, prodVer, recentDeploys,
+                    pendingReview, reviewedSessions, pipeline, activeItems,
+                    blockers, totalItems, doneItems, completionPct, readiness, staleAll
+                };
+            }
+            
+            return data;
+        }, [configuredApps, items, sessions, deps]);
+        
+        // === Phase 4.5: Generate Test Checklist ===
+        const generateTestChecklist = (appId) => {
+            const rd = releaseData[appId];
+            if (!rd) return [];
+            
+            const checklist = [];
+            let idx = 0;
+            
+            // Section 1: Recently completed work items
+            const doneItems = rd.app ? items.filter(wi => wi.appId === appId && wi.status === 'done') : [];
+            const recentDone = doneItems
+                .filter(wi => wi.completedAt && (Date.now() - new Date(wi.completedAt).getTime()) < 30 * 24 * 60 * 60 * 1000)
+                .sort((a, b) => new Date(b.completedAt) - new Date(a.completedAt));
+            
+            if (recentDone.length > 0) {
+                checklist.push({ id: `hdr-${idx++}`, type: 'header', text: 'Recently Shipped Features' });
+                recentDone.forEach(wi => {
+                    checklist.push({ 
+                        id: `feat-${wi.id}`, type: 'check', 
+                        text: `${wi.title}${wi.completedInVersion ? ` (v${wi.completedInVersion})` : ''}`,
+                        detail: wi.description || null
+                    });
+                    // Add acceptance criteria as sub-checks
+                    if (wi.criteria && wi.criteria.length > 0) {
+                        wi.criteria.filter(c => c.trim()).forEach((c, ci) => {
+                            checklist.push({ 
+                                id: `crit-${wi.id}-${ci}`, type: 'subcheck',
+                                text: c
+                            });
+                        });
+                    }
+                });
+            }
+            
+            // Section 2: Items currently in review
+            const inReview = items.filter(wi => wi.appId === appId && wi.status === 'review');
+            if (inReview.length > 0) {
+                checklist.push({ id: `hdr-${idx++}`, type: 'header', text: 'Pending Review — Verify Before Deploy' });
+                inReview.forEach(wi => {
+                    checklist.push({ 
+                        id: `rev-${wi.id}`, type: 'check',
+                        text: `${wi.title} — verify implementation matches spec`
+                    });
+                    if (wi.criteria && wi.criteria.length > 0) {
+                        wi.criteria.filter(c => c.trim()).forEach((c, ci) => {
+                            checklist.push({
+                                id: `revcrit-${wi.id}-${ci}`, type: 'subcheck',
+                                text: c
+                            });
+                        });
+                    }
+                });
+            }
+            
+            // Section 3: Standard user journeys
+            const appCategory = rd.app?.category || 'tool';
+            const journeys = {
+                game: [
+                    'Load app fresh (no cache) — game loads correctly',
+                    'Play a complete round — scoring works as expected',
+                    'Share results — share text formats correctly',
+                    'Return next day — daily reset works, stats preserved',
+                    'Switch between Easy/Hard modes (if applicable)',
+                    'Check responsive layout on mobile (375px width)',
+                    'Verify PWA install prompt and offline behavior'
+                ],
+                tool: [
+                    'Load app fresh — default state is correct',
+                    'Complete primary workflow end-to-end',
+                    'Save data — verify persistence after page reload',
+                    'Error handling — try invalid input, empty states',
+                    'Check responsive layout on mobile (375px width)',
+                    'Verify keyboard navigation works'
+                ],
+                dashboard: [
+                    'Load app — data populates correctly',
+                    'Verify all data sources are connected',
+                    'Check refresh behavior — data updates properly',
+                    'Filter/sort controls work as expected',
+                    'Check responsive layout on mobile (375px width)',
+                    'Verify loading states (slow network)'
+                ],
+                content: [
+                    'Load app — content renders correctly',
+                    'Navigate between sections/pages',
+                    'Verify external links open correctly',
+                    'Check responsive layout on mobile (375px width)',
+                    'Verify images/media load properly'
+                ],
+                admin: [
+                    'Create a new record — verify it appears',
+                    'Edit an existing record — changes persist',
+                    'Delete a record — confirm prompt works',
+                    'Verify data validation (required fields, formats)',
+                    'Check responsive layout on mobile (375px width)',
+                    'Verify access controls (if applicable)'
+                ]
+            };
+            
+            const categoryJourneys = journeys[appCategory] || journeys.tool;
+            checklist.push({ id: `hdr-${idx++}`, type: 'header', text: 'Standard User Journeys' });
+            categoryJourneys.forEach((j, ji) => {
+                checklist.push({ id: `journey-${ji}`, type: 'check', text: j });
+            });
+            
+            // Section 4: Regression checks for recently changed areas
+            const recentSessions = sessions
+                .filter(s => s.appId === appId && s.completedAt)
+                .sort((a, b) => new Date(b.completedAt) - new Date(a.completedAt))
+                .slice(0, 3);
+            
+            if (recentSessions.length > 0) {
+                checklist.push({ id: `hdr-${idx++}`, type: 'header', text: 'Regression Checks (Recent Sessions)' });
+                recentSessions.forEach((s, si) => {
+                    const typeLabel = s.type || 'build';
+                    const dateStr = new Date(s.completedAt || s.createdAt).toLocaleDateString();
+                    checklist.push({
+                        id: `regress-${si}`, type: 'check',
+                        text: `${typeLabel} session (${dateStr}) — verify no side effects from changes`
+                    });
+                    if (s.deliverables?.summary) {
+                        checklist.push({
+                            id: `regress-detail-${si}`, type: 'subcheck',
+                            text: `Deliverables: ${s.deliverables.summary}`
+                        });
+                    }
+                });
+            }
+            
+            // Section 5: Deploy verification
+            checklist.push({ id: `hdr-${idx++}`, type: 'header', text: 'Deploy Verification' });
+            checklist.push({ id: 'deploy-test', type: 'check', text: 'Deploy to test environment — verify live site matches local' });
+            checklist.push({ id: 'deploy-version', type: 'check', text: 'Version number displays correctly on deployed site' });
+            if (rd.app?.hasServiceWorker) {
+                checklist.push({ id: 'deploy-sw', type: 'check', text: 'Service worker updates — hard refresh shows new version' });
+                checklist.push({ id: 'deploy-pwa', type: 'check', text: 'PWA install/update works — no stale cache issues' });
+            }
+            checklist.push({ id: 'deploy-console', type: 'check', text: 'Browser console clean — no errors or warnings' });
+            checklist.push({ id: 'deploy-promote', type: 'check', text: 'Promote test → prod (when all checks pass)' });
+            
+            return checklist;
+        };
+        
+        // Checklist completion stats
+        const getChecklistStats = (checklistItems) => {
+            const checkable = checklistItems.filter(c => c.type === 'check' || c.type === 'subcheck');
+            const checked = checkable.filter(c => checklistState[c.id]);
+            return { total: checkable.length, done: checked.length, pct: checkable.length > 0 ? Math.round((checked.length / checkable.length) * 100) : 0 };
+        };
+        
+        const toggleCheck = (id) => {
+            setChecklistState(prev => ({ ...prev, [id]: !prev[id] }));
+        };
+        
+        // Readiness badge
+        const ReadinessBadge = ({ readiness }) => {
+            const styles = {
+                'ready': 'bg-green-500/20 text-green-400 border-green-500/30',
+                'almost': 'bg-amber-500/20 text-amber-400 border-amber-500/30',
+                'blocked': 'bg-red-500/20 text-red-400 border-red-500/30',
+                'in-progress': 'bg-blue-500/20 text-blue-400 border-blue-500/30',
+                'no-items': 'bg-slate-500/20 text-slate-400 border-slate-500/30',
+                'unknown': 'bg-slate-500/20 text-slate-400 border-slate-500/30'
+            };
+            const labels = {
+                'ready': '✅ Ready to Ship',
+                'almost': '🟡 Almost Ready',
+                'blocked': '🔴 Blocked',
+                'in-progress': '🔵 In Progress',
+                'no-items': '— No Work Items',
+                'unknown': '— Unknown'
+            };
+            return (
+                <span className={`px-2 py-0.5 rounded-full text-xs border ${styles[readiness] || styles.unknown}`}>
+                    {labels[readiness] || readiness}
+                </span>
+            );
+        };
+        
+        // Pipeline bar (mini)
+        const MiniPipelineBar = ({ pipeline }) => {
+            const total = Object.values(pipeline).reduce((s, v) => s + v, 0);
+            if (total === 0) return <span className="text-xs text-slate-500">No items</span>;
+            const segments = [
+                { key: 'done', color: 'bg-green-500', count: pipeline.done || 0 },
+                { key: 'review', color: 'bg-purple-500', count: pipeline.review || 0 },
+                { key: 'in-progress', color: 'bg-blue-500', count: pipeline['in-progress'] || 0 },
+                { key: 'ready', color: 'bg-amber-500', count: pipeline.ready || 0 },
+                { key: 'idea', color: 'bg-slate-500', count: pipeline.idea || 0 }
+            ].filter(s => s.count > 0);
+            
+            return (
+                <div className="flex items-center gap-2 w-full">
+                    <div className="flex-1 h-2 rounded-full bg-slate-700 overflow-hidden flex">
+                        {segments.map(s => (
+                            <div key={s.key} className={`${s.color} h-full`} 
+                                style={{ width: `${(s.count / total) * 100}%` }}
+                                title={`${s.key}: ${s.count}`} />
+                        ))}
+                    </div>
+                    <span className="text-xs text-slate-400 whitespace-nowrap">{pipeline.done || 0}/{total}</span>
+                </div>
+            );
+        };
+        
+        // Relative time
+        const relTime = (dateStr) => {
+            if (!dateStr) return '';
+            const diff = Date.now() - new Date(dateStr).getTime();
+            const mins = Math.floor(diff / 60000);
+            if (mins < 60) return `${mins}m ago`;
+            const hrs = Math.floor(mins / 60);
+            if (hrs < 24) return `${hrs}h ago`;
+            const days = Math.floor(hrs / 24);
+            return `${days}d ago`;
+        };
+        
+        // Filtered apps
+        const visibleApps = selectedApp === 'all' 
+            ? configuredApps 
+            : configuredApps.filter(a => a.id === selectedApp);
+        
+        // === Test Checklist Modal ===
+        if (showTestChecklist) {
+            const checklist = generateTestChecklist(showTestChecklist);
+            const stats = getChecklistStats(checklist);
+            const appName = apps[showTestChecklist]?.name || showTestChecklist;
+            const rd = releaseData[showTestChecklist];
+            const currentVer = rd?.testVer || rd?.prodVer || '?';
+            
+            return (
+                <div className="space-y-6">
+                    <div className="flex items-center justify-between">
+                        <div>
+                            <h1 className="text-2xl font-bold flex items-center gap-2">
+                                📋 Release Test Checklist
+                            </h1>
+                            <p className="text-sm text-slate-400 mt-1">{appName} — v{currentVer}</p>
+                        </div>
+                        <div className="flex items-center gap-3">
+                            <div className="text-right">
+                                <div className="text-lg font-bold">{stats.pct}%</div>
+                                <div className="text-xs text-slate-400">{stats.done}/{stats.total} checks</div>
+                            </div>
+                            <button onClick={() => { setShowTestChecklist(null); setChecklistState({}); }}
+                                className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 rounded text-sm">
+                                ← Back
+                            </button>
+                        </div>
+                    </div>
+                    
+                    {/* Progress bar */}
+                    <div className="w-full h-3 bg-slate-700 rounded-full overflow-hidden">
+                        <div className={`h-full transition-all duration-300 rounded-full ${
+                            stats.pct === 100 ? 'bg-green-500' : stats.pct >= 75 ? 'bg-amber-500' : 'bg-blue-500'
+                        }`} style={{ width: `${stats.pct}%` }} />
+                    </div>
+                    
+                    <div className="bg-slate-800 rounded-xl border border-slate-700 p-6 space-y-1">
+                        {checklist.map(item => {
+                            if (item.type === 'header') {
+                                return (
+                                    <div key={item.id} className="pt-4 pb-2 first:pt-0">
+                                        <h3 className="text-sm font-semibold text-slate-300 uppercase tracking-wide">{item.text}</h3>
+                                    </div>
+                                );
+                            }
+                            
+                            const isSubcheck = item.type === 'subcheck';
+                            const isChecked = checklistState[item.id] || false;
+                            
+                            return (
+                                <label key={item.id} className={`flex items-start gap-3 py-1.5 px-2 rounded cursor-pointer hover:bg-slate-700/50 ${
+                                    isSubcheck ? 'ml-6' : ''
+                                } ${isChecked ? 'opacity-60' : ''}`}>
+                                    <input type="checkbox" checked={isChecked} onChange={() => toggleCheck(item.id)}
+                                        className="mt-0.5 rounded border-slate-600 bg-slate-700 text-indigo-500 focus:ring-indigo-500" />
+                                    <div className="flex-1 min-w-0">
+                                        <span className={`text-sm ${isChecked ? 'line-through text-slate-500' : isSubcheck ? 'text-slate-400' : 'text-slate-200'}`}>
+                                            {item.text}
+                                        </span>
+                                        {item.detail && (
+                                            <div className="text-xs text-slate-500 mt-0.5">{item.detail}</div>
+                                        )}
+                                    </div>
+                                </label>
+                            );
+                        })}
+                    </div>
+                    
+                    {stats.pct === 100 && (
+                        <div className="bg-green-500/10 border border-green-500/30 rounded-xl p-4 text-center">
+                            <div className="text-lg font-bold text-green-400">✅ All checks passed!</div>
+                            <p className="text-sm text-green-300 mt-1">This release is ready for promotion to production.</p>
+                            <button onClick={() => { setView('smartdeploy'); }}
+                                className="mt-3 px-4 py-2 bg-green-600 hover:bg-green-500 rounded-lg text-sm font-medium">
+                                🚀 Go to Smart Deploy
+                            </button>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+        
+        // === Main Release Coordination View ===
+        return (
+            <div className="space-y-6">
+                <div className="flex items-center justify-between flex-wrap gap-4">
+                    <div>
+                        <h1 className="text-2xl font-bold">🚢 Release Coordination</h1>
+                        <p className="text-sm text-slate-400 mt-1">Track readiness, blockers, and test status per app</p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                        <select value={selectedApp} onChange={e => setSelectedApp(e.target.value)}
+                            className="bg-slate-700 border border-slate-600 rounded px-3 py-1.5 text-sm">
+                            <option value="all">All Apps ({configuredApps.length})</option>
+                            {configuredApps.map(a => (
+                                <option key={a.id} value={a.id}>{a.icon && a.icon !== 'gs-logo' ? a.icon : '📦'} {a.name}</option>
+                            ))}
+                        </select>
+                    </div>
+                </div>
+                
+                {/* Summary cards */}
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                    {(() => {
+                        const allRd = Object.values(releaseData);
+                        const readyCount = allRd.filter(r => r.readiness === 'ready').length;
+                        const blockedCount = allRd.filter(r => r.readiness === 'blocked').length;
+                        const totalDone = allRd.reduce((s, r) => s + r.doneItems, 0);
+                        const totalAll = allRd.reduce((s, r) => s + r.totalItems, 0);
+                        const staleTotal = allRd.reduce((s, r) => s + (r.staleAll?.length || 0), 0);
+                        return (
+                            <>
+                                <div className="bg-slate-800 rounded-lg border border-slate-700 p-3 text-center">
+                                    <div className="text-2xl font-bold text-green-400">{readyCount}</div>
+                                    <div className="text-xs text-slate-400">Ready to Ship</div>
+                                </div>
+                                <div className="bg-slate-800 rounded-lg border border-slate-700 p-3 text-center">
+                                    <div className="text-2xl font-bold text-red-400">{blockedCount}</div>
+                                    <div className="text-xs text-slate-400">Blocked</div>
+                                </div>
+                                <div className="bg-slate-800 rounded-lg border border-slate-700 p-3 text-center">
+                                    <div className="text-2xl font-bold">{totalAll > 0 ? Math.round((totalDone / totalAll) * 100) : 0}%</div>
+                                    <div className="text-xs text-slate-400">Overall Completion</div>
+                                </div>
+                                <div className="bg-slate-800 rounded-lg border border-slate-700 p-3 text-center">
+                                    <div className={`text-2xl font-bold ${staleTotal > 0 ? 'text-amber-400' : 'text-slate-400'}`}>{staleTotal}</div>
+                                    <div className="text-xs text-slate-400">Stale Items</div>
+                                </div>
+                            </>
+                        );
+                    })()}
+                </div>
+                
+                {/* Per-app release cards */}
+                {visibleApps.map(app => {
+                    const rd = releaseData[app.id];
+                    if (!rd) return null;
+                    
+                    return (
+                        <div key={app.id} className="bg-slate-800 rounded-xl border border-slate-700 overflow-hidden">
+                            {/* App header */}
+                            <div className="p-4 border-b border-slate-700">
+                                <div className="flex items-center justify-between flex-wrap gap-2">
+                                    <div className="flex items-center gap-3">
+                                        <span className="text-xl">{app.icon && app.icon !== 'gs-logo' ? app.icon : '📦'}</span>
+                                        <div>
+                                            <h2 className="font-semibold text-lg">{app.name}</h2>
+                                            <div className="flex items-center gap-3 text-xs text-slate-400 mt-0.5">
+                                                {rd.testVer && <span>Test: v{rd.testVer}</span>}
+                                                {rd.prodVer && <span>Prod: v{rd.prodVer}</span>}
+                                                {rd.testVer && rd.prodVer && rd.testVer !== rd.prodVer && (
+                                                    <span className="text-amber-400">⚠ Test ahead of Prod</span>
+                                                )}
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                        <ReadinessBadge readiness={rd.readiness} />
+                                        <button onClick={() => setShowTestChecklist(app.id)}
+                                            className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 rounded text-xs font-medium">
+                                            📋 Test Checklist
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <div className="p-4 space-y-4">
+                                {/* Pipeline bar */}
+                                <div>
+                                    <div className="flex items-center justify-between mb-1">
+                                        <span className="text-xs text-slate-400">Pipeline</span>
+                                        <span className="text-xs text-slate-400">{rd.completionPct}% complete</span>
+                                    </div>
+                                    <MiniPipelineBar pipeline={rd.pipeline} />
+                                    <div className="flex items-center gap-4 mt-1.5 text-xs text-slate-500">
+                                        {rd.pipeline.idea > 0 && <span>💡 {rd.pipeline.idea} idea{rd.pipeline.idea > 1 ? 's' : ''}</span>}
+                                        {rd.pipeline.ready > 0 && <span>📋 {rd.pipeline.ready} ready</span>}
+                                        {rd.pipeline['in-progress'] > 0 && <span>🔨 {rd.pipeline['in-progress']} WIP</span>}
+                                        {rd.pipeline.review > 0 && <span>👁 {rd.pipeline.review} review</span>}
+                                        {rd.pipeline.done > 0 && <span>✅ {rd.pipeline.done} done</span>}
+                                    </div>
+                                </div>
+                                
+                                {/* Blockers */}
+                                {rd.blockers.length > 0 && (
+                                    <div className="bg-red-500/10 border border-red-500/20 rounded-lg p-3">
+                                        <h4 className="text-xs font-semibold text-red-400 mb-1">Blockers</h4>
+                                        <ul className="space-y-0.5">
+                                            {rd.blockers.map((b, i) => (
+                                                <li key={i} className="text-xs text-red-300">• {b}</li>
+                                            ))}
+                                        </ul>
+                                    </div>
+                                )}
+                                
+                                {/* Milestone breakdown (expandable) */}
+                                {Object.keys(rd.milestones).length > 0 && (
+                                    <details className="group">
+                                        <summary className="text-xs text-slate-400 cursor-pointer hover:text-slate-300">
+                                            ▸ Milestones ({Object.keys(rd.milestones).length})
+                                        </summary>
+                                        <div className="mt-2 space-y-2">
+                                            {Object.entries(rd.milestones)
+                                                .sort((a, b) => {
+                                                    const order = { production: 0, beta: 1, alpha: 2, prototype: 3, unassigned: 4 };
+                                                    return (order[a[0]] ?? 5) - (order[b[0]] ?? 5);
+                                                })
+                                                .map(([ms, msData]) => (
+                                                    <div key={ms} className="bg-slate-700/50 rounded-lg p-3">
+                                                        <div className="flex items-center justify-between mb-1">
+                                                            <span className="text-xs font-medium capitalize">{ms}</span>
+                                                            <span className="text-xs text-slate-400">{msData.done}/{msData.total} done</span>
+                                                        </div>
+                                                        <div className="w-full h-1.5 bg-slate-700 rounded-full overflow-hidden">
+                                                            <div className="h-full bg-green-500 rounded-full" 
+                                                                style={{ width: `${msData.total > 0 ? (msData.done / msData.total) * 100 : 0}%` }} />
+                                                        </div>
+                                                        {msData.stale.length > 0 && (
+                                                            <div className="text-xs text-amber-400 mt-1">⚠ {msData.stale.length} stale</div>
+                                                        )}
+                                                    </div>
+                                                ))
+                                            }
+                                        </div>
+                                    </details>
+                                )}
+                                
+                                {/* Recent deploys */}
+                                {rd.recentDeploys.length > 0 && (
+                                    <details className="group">
+                                        <summary className="text-xs text-slate-400 cursor-pointer hover:text-slate-300">
+                                            ▸ Recent Deploys ({rd.recentDeploys.length})
+                                        </summary>
+                                        <div className="mt-2 space-y-1">
+                                            {rd.recentDeploys.map((d, i) => (
+                                                <div key={i} className="flex items-center justify-between text-xs py-1 px-2 bg-slate-700/30 rounded">
+                                                    <span>v{d.version || '?'} → {d.target || d.environment || '?'}</span>
+                                                    <span className="text-slate-500">{relTime(d.timestamp || d.date)}</span>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </details>
+                                )}
+                                
+                                {/* Go/No-Go summary */}
+                                {rd.readiness === 'ready' && (
+                                    <div className="bg-green-500/10 border border-green-500/20 rounded-lg p-3 flex items-center justify-between">
+                                        <span className="text-sm text-green-400">All {rd.totalItems} items complete. Ready to ship.</span>
+                                        <button onClick={() => setView('smartdeploy')}
+                                            className="px-3 py-1 bg-green-600 hover:bg-green-500 rounded text-xs font-medium">
+                                            🚀 Deploy
+                                        </button>
+                                    </div>
+                                )}
+                                
+                                {rd.readiness === 'almost' && (
+                                    <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg p-3">
+                                        <span className="text-sm text-amber-400">{rd.completionPct}% complete — {rd.totalItems - rd.doneItems} item{rd.totalItems - rd.doneItems > 1 ? 's' : ''} remaining.</span>
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    );
+                })}
+                
+                {visibleApps.length === 0 && (
+                    <div className="bg-slate-800 rounded-xl border border-slate-700 p-12 text-center text-slate-400">
+                        No configured apps found. Set up apps with repos in the Configure section.
+                    </div>
                 )}
             </div>
         );
