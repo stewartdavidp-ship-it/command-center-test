@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Command Center</title>
-    <meta name="version" content="8.44.0">
+    <meta name="version" content="8.45.0">
     <meta name="gs-app-id" content="command-center">
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -3235,7 +3235,7 @@
             ],
             contextStrategy: {
                 alwaysInclude: ['CONTEXT.md', 'CLAUDE_INSTRUCTIONS.md', 'CLAUDE-PREP-STANDARD.md'],
-                preferInclude: ['PROJECT_PLAN.md', 'ARCHITECTURE.md'],
+                preferInclude: ['PROJECT_PLAN.md', 'ARCHITECTURE.md', 'PRODUCT_BRIEF.md'],
                 skipWhenTight: ['CHANGELOG.md', 'RELEASE_NOTES.txt'],
                 includeSource: true
             },
@@ -3262,7 +3262,7 @@
                 'Key decisions with rationale'
             ],
             contextStrategy: {
-                alwaysInclude: ['CONTEXT.md', 'ARCHITECTURE.md', 'PROJECT_PLAN.md'],
+                alwaysInclude: ['CONTEXT.md', 'ARCHITECTURE.md', 'PROJECT_PLAN.md', 'PRODUCT_BRIEF.md'],
                 preferInclude: ['CLAUDE_INSTRUCTIONS.md'],
                 skipWhenTight: ['CHANGELOG.md', 'RELEASE_NOTES.txt', 'CLAUDE-PREP-STANDARD.md'],
                 includeSource: true
@@ -3292,7 +3292,7 @@
             ],
             contextStrategy: {
                 alwaysInclude: ['CONTEXT.md', 'CLAUDE-PREP-STANDARD.md'],
-                preferInclude: ['CLAUDE_INSTRUCTIONS.md'],
+                preferInclude: ['CLAUDE_INSTRUCTIONS.md', 'PRODUCT_BRIEF.md'],
                 skipWhenTight: ['CHANGELOG.md', 'RELEASE_NOTES.txt', 'PROJECT_PLAN.md', 'ARCHITECTURE.md'],
                 includeSource: true
             },
@@ -3320,7 +3320,7 @@
             ],
             contextStrategy: {
                 alwaysInclude: ['CONTEXT.md', 'CLAUDE_INSTRUCTIONS.md'],
-                preferInclude: ['ARCHITECTURE.md', 'PROJECT_PLAN.md'],
+                preferInclude: ['ARCHITECTURE.md', 'PROJECT_PLAN.md', 'PRODUCT_BRIEF.md'],
                 skipWhenTight: ['CHANGELOG.md', 'RELEASE_NOTES.txt', 'CLAUDE-PREP-STANDARD.md'],
                 includeSource: true
             },
@@ -3347,7 +3347,7 @@
                 'Next steps or implementation plan'
             ],
             contextStrategy: {
-                alwaysInclude: ['CONTEXT.md'],
+                alwaysInclude: ['CONTEXT.md', 'PRODUCT_BRIEF.md'],
                 preferInclude: ['ARCHITECTURE.md', 'PROJECT_PLAN.md'],
                 skipWhenTight: ['CHANGELOG.md', 'RELEASE_NOTES.txt', 'CLAUDE-PREP-STANDARD.md', 'CLAUDE_INSTRUCTIONS.md'],
                 includeSource: false
@@ -3376,7 +3376,7 @@
             ],
             contextStrategy: {
                 alwaysInclude: ['CONTEXT.md', 'CLAUDE_INSTRUCTIONS.md', 'CLAUDE-PREP-STANDARD.md'],
-                preferInclude: ['ARCHITECTURE.md'],
+                preferInclude: ['ARCHITECTURE.md', 'PRODUCT_BRIEF.md'],
                 skipWhenTight: ['CHANGELOG.md', 'RELEASE_NOTES.txt', 'PROJECT_PLAN.md'],
                 includeSource: true
             },
@@ -3405,7 +3405,7 @@
             ],
             contextStrategy: {
                 alwaysInclude: ['CONTEXT.md', 'CLAUDE_INSTRUCTIONS.md'],
-                preferInclude: ['CLAUDE-PREP-STANDARD.md'],
+                preferInclude: ['CLAUDE-PREP-STANDARD.md', 'PRODUCT_BRIEF.md'],
                 skipWhenTight: ['CHANGELOG.md', 'RELEASE_NOTES.txt', 'PROJECT_PLAN.md', 'ARCHITECTURE.md'],
                 includeSource: true
             },
@@ -3433,7 +3433,7 @@
             ],
             contextStrategy: {
                 alwaysInclude: ['CONTEXT.md'],
-                preferInclude: ['PROJECT_PLAN.md', 'CHANGELOG.md', 'RELEASE_NOTES.txt', 'ARCHITECTURE.md'],
+                preferInclude: ['PROJECT_PLAN.md', 'CHANGELOG.md', 'RELEASE_NOTES.txt', 'ARCHITECTURE.md', 'PRODUCT_BRIEF.md'],
                 skipWhenTight: ['CLAUDE-PREP-STANDARD.md', 'CLAUDE_INSTRUCTIONS.md'],
                 includeSource: true
             },
@@ -11824,6 +11824,7 @@
         // Session docs: change often, upload each time
         const SESSION_DOCS = [
             { name: 'SESSION_BRIEF.md', desc: 'Auto-generated session context with current state', changeFreq: 'Every session — auto-generated' },
+            { name: 'PRODUCT_BRIEF.md', desc: 'Auto-generated product description in PM language', changeFreq: 'Every session — auto-generated' },
             { name: 'CHANGELOG.md', desc: 'Full version history', changeFreq: 'Every deploy — new entries added' },
             { name: 'RELEASE_NOTES.txt', desc: 'Human-readable release notes', changeFreq: 'Every deploy — new entries added' },
             { name: 'PROJECT_PLAN.md', desc: 'Roadmap and planned features', changeFreq: 'Moderate — updated as scope evolves' },
@@ -11836,6 +11837,7 @@
             const persistentTokenEstimates = {
                 'CONTEXT.md': 12000,       // ~35KB typical
                 'CLAUDE_INSTRUCTIONS.md': 4000,  // ~12KB typical
+                'PRODUCT_BRIEF.md': 3000,  // ~8KB typical (Phase 5.5)
                 'ARCHITECTURE.md': 6000,    // ~18KB typical
                 'CLAUDE-PREP-STANDARD.md': 3500,  // ~10KB typical
             };
@@ -19389,6 +19391,275 @@ The deploy will appear in Command Center's Session tab for one-click deployment.
     }
     
     // =========================================================================
+    // PRODUCT BRIEF GENERATOR (Phase 5.5)
+    // Auto-generated living document in PM language describing the product.
+    // Included in Claude Prep packages so any stream owner gets product context
+    // without needing another stream's source code.
+    // =========================================================================
+    
+    const ProductBriefGenerator = {
+        
+        /**
+         * Generate PRODUCT_BRIEF.md from existing CC data sources.
+         * @param {Object} app - App definition from CC config
+         * @param {Object} scopeData - Scope data from Firebase appScopes/{appId} (nullable)
+         * @param {Object} config - CC config (for project info)
+         * @param {Array} workItems - All work items (will be filtered to this app)
+         * @param {Array} deployments - Deploy history
+         * @param {Array} streams - Work streams (nullable)
+         * @returns {string} Markdown content for PRODUCT_BRIEF.md
+         */
+        generate(app, scopeData, config, workItems, deployments, streams) {
+            const now = new Date();
+            const projectDef = config?.projects?.[app.project] || {};
+            const appItems = (workItems || []).filter(wi => wi.appId === app.id);
+            const appStreams = (streams || []).filter(s => s.appId === app.id);
+            const appDeploys = (deployments || []).filter(d => d.appId === app.id && d.status === 'success');
+            const cat = scopeData?.category ? (SCOPE_CATEGORIES[scopeData.category] || {}) : {};
+            
+            let md = '';
+            
+            // === Header ===
+            md += `# ${app.name} — Product Brief\n\n`;
+            md += `> Living document auto-generated from Command Center project data.\n`;
+            md += `> Describes what the product does in PM language — not how it's built.\n`;
+            md += `> Updated: ${now.toLocaleDateString()}\n\n`;
+            
+            // === Product Identity ===
+            md += `## Product Identity\n\n`;
+            const description = scopeData?.description || app.lifecycle?.problemStatement || '';
+            if (description) {
+                md += `${description}\n\n`;
+            }
+            md += `- **Category:** ${cat.icon || app.icon || '📦'} ${cat.label || scopeData?.category || app.lifecycle?.category || 'Application'}\n`;
+            if (projectDef.name) md += `- **Project:** ${projectDef.name}\n`;
+            md += `- **Maturity:** ${app.lifecycle?.currentMaturity || 'unknown'}`;
+            if (app.lifecycle?.maturityTarget && app.lifecycle.maturityTarget !== app.lifecycle.currentMaturity) {
+                md += ` → ${app.lifecycle.maturityTarget}`;
+            }
+            md += `\n`;
+            if (app.lifecycle?.targetAudience) md += `- **Audience:** ${app.lifecycle.targetAudience}\n`;
+            if (app.lifecycle?.userGoal) md += `- **User Goal:** ${app.lifecycle.userGoal}\n`;
+            if (app.lifecycle?.successMetric) md += `- **Success Metric:** ${app.lifecycle.successMetric}\n`;
+            
+            const prodVer = app.versions?.prod || app.versions?.test || '—';
+            const lastDeploy = appDeploys[0];
+            md += `- **Current Version:** ${prodVer}`;
+            if (lastDeploy) {
+                md += ` (deployed ${new Date(lastDeploy.completedAt || lastDeploy.startedAt).toLocaleDateString()})`;
+            }
+            md += `\n\n`;
+            
+            // === Key Product Decisions ===
+            if (scopeData?.categoryAnswers && Object.keys(scopeData.categoryAnswers).length > 0) {
+                md += `## Key Product Decisions\n\n`;
+                md += this._formatProductDecisions(scopeData, cat);
+                md += '\n';
+            }
+            
+            // === Feature Inventory ===
+            md += this._generateFeatureInventory(appItems, scopeData);
+            
+            // === Work Streams (if any) ===
+            if (appStreams.length > 0) {
+                md += this._generateStreamOverview(appStreams, appItems);
+            }
+            
+            // === Recent Activity ===
+            if (appDeploys.length > 0) {
+                md += `## Recent Releases\n\n`;
+                const recent = appDeploys.slice(0, 5);
+                recent.forEach(d => {
+                    const date = new Date(d.completedAt || d.startedAt).toLocaleDateString();
+                    const env = (d.target || 'prod').toUpperCase();
+                    md += `- **v${d.version || '?'}** (${date}, ${env})`;
+                    if (d.workItemsCompleted) md += ` — ${d.workItemsCompleted} item${d.workItemsCompleted !== 1 ? 's' : ''} shipped`;
+                    md += `\n`;
+                });
+                md += '\n';
+            }
+            
+            // === Decisions from Scoping ===
+            if (scopeData?.decisions && scopeData.decisions.length > 0) {
+                md += `## Open Decisions\n\n`;
+                scopeData.decisions.forEach(d => {
+                    md += `- ${d.title || d}`;
+                    if (d.status === 'resolved') md += ` ✅`;
+                    md += `\n`;
+                });
+                md += '\n';
+            }
+            
+            md += `---\n`;
+            md += `*Generated ${now.toLocaleDateString()} by Command Center v${document.querySelector('meta[name="version"]')?.content || '?'}*\n`;
+            
+            return md;
+        },
+        
+        /**
+         * Format scoping category answers as human-readable product decisions.
+         */
+        _formatProductDecisions(scopeData, cat) {
+            const answers = scopeData.categoryAnswers || {};
+            let md = '';
+            
+            // Map technical scope answers to PM-language decisions
+            const decisionMap = {
+                // Game
+                difficulty: { label: 'Difficulty', format: v => v === 'easy-hard' ? 'Two modes (Easy & Hard)' : v === 'multiple' ? 'Multiple levels' : 'No difficulty modes' },
+                scoring: { label: 'Scoring', format: v => v === 'points' ? 'Point-based scoring' : v === 'stars' ? 'Star rating' : v === 'streaks' ? 'Streak-based' : v || 'None' },
+                dailyPuzzle: { label: 'Daily Content', format: v => v ? 'Yes — daily puzzle/challenge' : 'No — play anytime' },
+                multiplayer: { label: 'Multiplayer', format: v => v ? 'Yes' : 'No — single player' },
+                sharing: { label: 'Share Results', format: v => v ? 'Yes — shareable results' : 'No sharing' },
+                
+                // Tool
+                multiItem: { label: 'Item Model', format: v => v === 'list' ? 'Works with a list of items' : v === 'single' ? 'Single item at a time' : v || 'Unknown' },
+                dataPersistence: { label: 'Data Persistence', format: v => v === 'firebase' ? 'Saves to cloud (syncs across devices)' : v === 'localStorage' ? 'Saves locally (this device only)' : v === 'none' ? 'No save — session only' : v || 'Unknown' },
+                exportImport: { label: 'Import/Export', format: v => v ? 'Yes' : 'No' },
+                
+                // Dashboard
+                dataSource: { label: 'Data Source', format: v => v === 'firebase' ? 'Database' : v === 'api' ? 'External service' : v === 'manual' ? 'User input' : v || 'Unknown' },
+                dataUpdates: { label: 'Data Updates', format: v => v === 'realtime' ? 'Instant (real-time)' : v === 'periodic' ? 'Periodic auto-refresh' : 'Manual refresh' },
+                
+                // Content
+                contentType: { label: 'Content Updates', format: v => v === 'dynamic' ? 'Updates regularly' : 'Same every time' },
+                navigation: { label: 'Content Size', format: v => v === 'paginated' ? 'Many pages' : v === 'multi-section' ? 'Multiple sections' : 'Single page' },
+                
+                // Admin
+                crudOperations: { label: 'CRUD', format: v => v ? 'Create, edit, and delete records' : 'Read-only' },
+                authRequired: { label: 'Authentication', format: v => v ? 'Login required' : 'No auth' }
+            };
+            
+            for (const [key, value] of Object.entries(answers)) {
+                const mapper = decisionMap[key];
+                if (mapper && value !== undefined && value !== null && value !== '') {
+                    md += `- **${mapper.label}:** ${mapper.format(value)}\n`;
+                }
+            }
+            
+            return md;
+        },
+        
+        /**
+         * Generate the feature inventory section from work items and scope data.
+         */
+        _generateFeatureInventory(appItems, scopeData) {
+            let md = `## Feature Inventory\n\n`;
+            
+            // Shipped features (done work items)
+            const shipped = appItems.filter(wi => wi.status === 'done' && (wi.type === 'feature' || wi.type === 'enhancement'));
+            // In-progress
+            const inProgress = appItems.filter(wi => (wi.status === 'in-progress' || wi.status === 'review') && (wi.type === 'feature' || wi.type === 'enhancement'));
+            // Planned (ready)
+            const planned = appItems.filter(wi => wi.status === 'ready' && (wi.type === 'feature' || wi.type === 'enhancement'));
+            // Ideas
+            const ideas = appItems.filter(wi => wi.status === 'idea' && (wi.type === 'feature' || wi.type === 'enhancement'));
+            
+            if (shipped.length > 0) {
+                md += `### Shipped (${shipped.length})\n`;
+                shipped.forEach(wi => {
+                    md += `- ✅ ${wi.title}`;
+                    if (wi.milestone) md += ` (${wi.milestone})`;
+                    md += `\n`;
+                });
+                md += '\n';
+            }
+            
+            if (inProgress.length > 0) {
+                md += `### In Progress (${inProgress.length})\n`;
+                inProgress.forEach(wi => {
+                    md += `- 🔄 ${wi.title}`;
+                    if (wi.status === 'review') md += ` — in review`;
+                    md += `\n`;
+                });
+                md += '\n';
+            }
+            
+            if (planned.length > 0) {
+                md += `### Planned (${planned.length})\n`;
+                planned.forEach(wi => {
+                    md += `- 📋 ${wi.title}`;
+                    if (wi.priority === 'must-have' || wi.priority === 'core') md += ` ⭐`;
+                    md += `\n`;
+                });
+                md += '\n';
+            }
+            
+            if (ideas.length > 0) {
+                md += `### Ideas (${ideas.length})\n`;
+                ideas.slice(0, 10).forEach(wi => {
+                    md += `- 💡 ${wi.title}\n`;
+                });
+                if (ideas.length > 10) md += `- *...and ${ideas.length - 10} more ideas*\n`;
+                md += '\n';
+            }
+            
+            // Also pull from scope's future features if no work items exist yet
+            if (shipped.length === 0 && inProgress.length === 0 && planned.length === 0 && scopeData?.v1Features) {
+                md += `### Launch Features (from scope)\n`;
+                (scopeData.v1Features || []).filter(f => f.priority !== 'out-of-scope').forEach(f => {
+                    md += `- ${f.title}`;
+                    if (f.priority === 'core' || f.priority === 'must-have') md += ` ⭐`;
+                    md += `\n`;
+                });
+                md += '\n';
+            }
+            
+            if (shipped.length === 0 && inProgress.length === 0 && planned.length === 0 && !scopeData?.v1Features) {
+                md += `*No features tracked yet. Use the Scoping flow or Backlog to define features.*\n\n`;
+            }
+            
+            // Known bugs count
+            const bugs = appItems.filter(wi => wi.type === 'bugfix' && wi.status !== 'done' && wi.status !== 'deferred');
+            if (bugs.length > 0) {
+                md += `### Known Issues (${bugs.length})\n`;
+                bugs.forEach(wi => {
+                    md += `- 🐛 ${wi.title}`;
+                    if (wi.priority === 'must-have' || wi.priority === 'critical') md += ` ❗`;
+                    md += `\n`;
+                });
+                md += '\n';
+            }
+            
+            return md;
+        },
+        
+        /**
+         * Generate stream overview section.
+         */
+        _generateStreamOverview(appStreams, appItems) {
+            let md = `## Work Streams\n\n`;
+            
+            appStreams.forEach(stream => {
+                const streamItems = appItems.filter(wi => wi.streamId === stream.id);
+                const done = streamItems.filter(wi => wi.status === 'done').length;
+                const total = streamItems.length;
+                const pct = total > 0 ? Math.round(done / total * 100) : 0;
+                
+                md += `### ${stream.name}`;
+                if (stream.status === 'complete') md += ` ✅`;
+                else if (stream.status === 'blocked') md += ` 🚫`;
+                md += `\n`;
+                if (stream.owner) md += `- **Owner:** ${stream.owner}\n`;
+                if (stream.goal) md += `- **Goal:** ${stream.goal}\n`;
+                md += `- **Progress:** ${done}/${total} items (${pct}%)\n`;
+                if (stream.status !== 'active' && stream.status !== 'complete') md += `- **Status:** ${stream.status}\n`;
+                md += '\n';
+            });
+            
+            return md;
+        },
+        
+        /**
+         * Check if enough data exists to generate a useful brief.
+         */
+        hasData(app, scopeData, workItems) {
+            const appItems = (workItems || []).filter(wi => wi.appId === app.id);
+            return !!(scopeData || appItems.length > 0 || app.lifecycle?.problemStatement || app.lifecycle?.category);
+        }
+    };
+    
+    // =========================================================================
     // CONTEXT.md GENERATOR (Phase 3.2)
     // =========================================================================
     
@@ -25017,6 +25288,7 @@ const pushIssueToCommandCenter = async (testResult) => {
         const [newProjectForm, setNewProjectForm] = React.useState(null);
         const [newAppForm, setNewAppForm] = React.useState(null);
         const [prepApp, setPrepApp] = React.useState(null);
+        const [viewBriefApp, setViewBriefApp] = React.useState(null); // Phase 5.5: Product Brief viewer
         
         const formatDate = (ts) => {
             if (!ts) return '—';
@@ -25352,6 +25624,10 @@ const pushIssueToCommandCenter = async (testResult) => {
                                                     
                                                     {/* Actions */}
                                                     <div className="col-span-1 flex gap-1 justify-end">
+                                                        <button onClick={() => setViewBriefApp(app)}
+                                                            className="p-1.5 text-slate-500 hover:text-blue-400 hover:bg-slate-700 rounded" title="Product Brief">
+                                                            📄
+                                                        </button>
                                                         <button onClick={() => setPrepApp(app)}
                                                             className="p-1.5 text-slate-500 hover:text-purple-400 hover:bg-slate-700 rounded" title="Claude Prep">
                                                             🤖
@@ -25417,7 +25693,122 @@ const pushIssueToCommandCenter = async (testResult) => {
                         globalStreams={globalStreams}
                     />
                 )}
+                
+                {/* Product Brief Modal (Phase 5.5) */}
+                {viewBriefApp && (
+                    <ProductBriefModal
+                        app={viewBriefApp}
+                        config={config}
+                        globalWorkItems={globalWorkItems}
+                        deployments={deployments || []}
+                        globalStreams={globalStreams}
+                        firebaseUid={firebaseUid}
+                        onClose={() => setViewBriefApp(null)}
+                        showAlert={showAlert}
+                    />
+                )}
             </div>
+        );
+    }
+
+    // =========================================================================
+    // PRODUCT BRIEF MODAL (Phase 5.5)
+    // Lightweight viewer for auto-generated Product Brief
+    // =========================================================================
+    function ProductBriefModal({ app, config, globalWorkItems, deployments, globalStreams, firebaseUid, onClose, showAlert }) {
+        const [briefContent, setBriefContent] = React.useState(null);
+        const [loading, setLoading] = React.useState(true);
+        
+        React.useEffect(() => {
+            async function loadBrief() {
+                try {
+                    let scopeData = null;
+                    if (firebaseUid && typeof firebaseDb !== 'undefined' && firebaseDb) {
+                        try {
+                            const snap = await firebaseDb.ref(`command-center/${firebaseUid}/appScopes/${app.id}`).once('value');
+                            scopeData = snap.val();
+                        } catch (e) { /* scope data optional */ }
+                    }
+                    
+                    const brief = ProductBriefGenerator.generate(app, scopeData, config, globalWorkItems, deployments, globalStreams);
+                    setBriefContent(brief);
+                } catch (e) {
+                    setBriefContent(`# Error\n\nCould not generate product brief: ${e.message}`);
+                }
+                setLoading(false);
+            }
+            loadBrief();
+        }, [app.id]);
+        
+        const copyBrief = () => {
+            if (briefContent) {
+                navigator.clipboard.writeText(briefContent);
+                showAlert('Product brief copied to clipboard', 'success');
+            }
+        };
+        
+        // Simple markdown renderer (reuse pattern from elsewhere in CC)
+        const renderMarkdown = (md) => {
+            if (!md) return null;
+            const lines = md.split('\n');
+            const elements = [];
+            let i = 0;
+            
+            while (i < lines.length) {
+                const line = lines[i];
+                
+                if (line.startsWith('# ')) {
+                    elements.push(React.createElement('h1', { key: i, className: 'text-xl font-bold text-white mb-2 mt-4' }, line.slice(2)));
+                } else if (line.startsWith('## ')) {
+                    elements.push(React.createElement('h2', { key: i, className: 'text-lg font-semibold text-slate-200 mb-2 mt-4 border-b border-slate-700 pb-1' }, line.slice(3)));
+                } else if (line.startsWith('### ')) {
+                    elements.push(React.createElement('h3', { key: i, className: 'text-base font-medium text-slate-300 mb-1 mt-3' }, line.slice(4)));
+                } else if (line.startsWith('> ')) {
+                    elements.push(React.createElement('blockquote', { key: i, className: 'text-xs text-slate-500 italic border-l-2 border-slate-700 pl-2 mb-1' }, line.slice(2)));
+                } else if (line.startsWith('- ')) {
+                    elements.push(React.createElement('div', { key: i, className: 'text-sm text-slate-300 ml-3 mb-0.5' }, '• ' + line.slice(2).replace(/\*\*([^*]+)\*\*/g, (_, t) => t)));
+                } else if (line.startsWith('---')) {
+                    elements.push(React.createElement('hr', { key: i, className: 'border-slate-700 my-3' }));
+                } else if (line.startsWith('*') && line.endsWith('*') && !line.startsWith('**')) {
+                    elements.push(React.createElement('p', { key: i, className: 'text-xs text-slate-600 italic' }, line.replace(/\*/g, '')));
+                } else if (line.trim()) {
+                    elements.push(React.createElement('p', { key: i, className: 'text-sm text-slate-300 mb-1' }, line.replace(/\*\*([^*]+)\*\*/g, (_, t) => t)));
+                }
+                i++;
+            }
+            return elements;
+        };
+        
+        return React.createElement('div', {
+            className: 'fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4',
+            onClick: (e) => e.target === e.currentTarget && onClose()
+        },
+            React.createElement('div', { className: 'bg-slate-800 rounded-xl w-full max-w-2xl max-h-[85vh] flex flex-col border border-slate-700 shadow-2xl' },
+                // Header
+                React.createElement('div', { className: 'flex items-center justify-between p-4 border-b border-slate-700' },
+                    React.createElement('div', { className: 'flex items-center gap-2' },
+                        React.createElement('span', { className: 'text-lg' }, '📄'),
+                        React.createElement('h2', { className: 'text-lg font-semibold text-white' }, `Product Brief — ${app.name}`),
+                    ),
+                    React.createElement('div', { className: 'flex gap-2' },
+                        React.createElement('button', {
+                            onClick: copyBrief,
+                            className: 'px-3 py-1.5 text-sm bg-slate-700 text-slate-300 rounded hover:bg-slate-600 transition-colors',
+                            title: 'Copy markdown to clipboard'
+                        }, '📋 Copy'),
+                        React.createElement('button', {
+                            onClick: onClose,
+                            className: 'p-1.5 text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors'
+                        }, '✕')
+                    )
+                ),
+                // Content
+                React.createElement('div', { className: 'flex-1 overflow-y-auto p-4' },
+                    loading
+                        ? React.createElement('div', { className: 'flex items-center justify-center py-12 text-slate-400' }, '⏳ Generating brief...')
+                        : renderMarkdown(briefContent)
+                )
+            )
         );
     }
 
@@ -25588,6 +25979,7 @@ const pushIssueToCommandCenter = async (testResult) => {
         // Known doc files always push to repo
         if (CLAUDE_PREP_DOCS.includes(fileName)) return 'push-doc';
         if (fileName === 'SESSION_BRIEF.md') return 'skip'; // Auto-generated, don't push
+        if (fileName === 'PRODUCT_BRIEF.md') return 'skip'; // Auto-generated, don't push (Phase 5.5)
         // .md and .txt files → push to repo
         if (DOC_FILE_EXTENSIONS.test(fileName)) return 'push-doc';
         // Everything else → deploy to GitHub Pages
@@ -26353,11 +26745,35 @@ ${repoStr || '- *No repos configured*'}
                     }
                 }
                 
+                // === Generate PRODUCT_BRIEF.md (Phase 5.5) ===
+                const hasProductBrief = files.some(f => f.name === 'PRODUCT_BRIEF.md');
+                if (!hasProductBrief && firebaseDb && firebaseAuth?.currentUser) {
+                    try {
+                        // Fetch scope data if not already fetched for CLAUDE_INSTRUCTIONS
+                        let briefScopeData = null;
+                        try {
+                            const scopeSnap = await firebaseDb.ref(`command-center/${firebaseAuth.currentUser.uid}/appScopes/${app.id}`).once('value');
+                            briefScopeData = scopeSnap.val();
+                        } catch (e) { /* scope data optional */ }
+                        
+                        if (ProductBriefGenerator.hasData(app, briefScopeData, globalWorkItems)) {
+                            const brief = ProductBriefGenerator.generate(app, briefScopeData, config, globalWorkItems, deployments, globalStreams);
+                            if (brief) {
+                                appFolder.file('PRODUCT_BRIEF.md', brief);
+                                files.push({ name: 'PRODUCT_BRIEF.md', size: brief.length, generated: true, tokens: TokenRegistryService.estimateTokens(brief, 'PRODUCT_BRIEF.md') });
+                                addLog('📄 Generated PRODUCT_BRIEF.md — product context for all streams');
+                            }
+                        }
+                    } catch (e) {
+                        addLog('\u26a0\ufe0f Could not generate PRODUCT_BRIEF.md: ' + e.message, 'warn');
+                    }
+                }
+                
                 // === Scan for extra docs ===
                 addLog('\ud83d\udd0d Scanning for extra reference docs...');
                 setProgress({ current: 6, total: 9 });
                 
-                const alreadyFetched = new Set([...CLAUDE_PREP_DOCS, ...files.map(f => f.name), 'SESSION_BRIEF.md']);
+                const alreadyFetched = new Set([...CLAUDE_PREP_DOCS, ...files.map(f => f.name), 'SESSION_BRIEF.md', 'PRODUCT_BRIEF.md']);
                 const scanPath = subPath || '';
                 
                 try {
