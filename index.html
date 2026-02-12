@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Command Center</title>
-    <meta name="version" content="8.56.4">
+    <meta name="version" content="8.56.5">
     <meta name="gs-app-id" content="command-center">
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -8138,10 +8138,14 @@
                                     
                                     const pushedDocIds = [];
                                     const actuallyPushedDocs = []; // Only docs whose content changed
+                                    // Determine target from the first doc file (all share same target from DeployAllModal)
+                                    const docTarget = docFiles[0]?.target || 'test';
                                     for (const [appId, appDocs] of Object.entries(docsByApp)) {
                                         const app = apps[appId];
                                         if (!app) continue;
-                                        const repo = app.repos?.prod || app.prodRepo || app.repos?.test || app.testRepo;
+                                        const repo = docTarget === 'prod'
+                                            ? (app.repos?.prod || app.prodRepo || app.repos?.test || app.testRepo)
+                                            : (app.repos?.test || app.testRepo || app.repos?.prod || app.prodRepo);
                                         if (!repo) {
                                             console.warn(`No repo configured for ${appId}, skipping doc push`);
                                             continue;
@@ -10227,7 +10231,9 @@
                                                 
                                                 if (selectedDocFiles.length > 0 && github) {
                                                     const app = apps[deployTarget.appId];
-                                                    const repo = app?.repos?.prod || app?.prodRepo || app?.repos?.test || app?.testRepo;
+                                                    const repo = deployTarget.target === 'prod'
+                                                        ? (app?.repos?.prod || app?.prodRepo || app?.repos?.test || app?.testRepo)
+                                                        : (app?.repos?.test || app?.testRepo || app?.repos?.prod || app?.prodRepo);
                                                     if (repo) {
                                                         console.log('Pushing docs to:', repo);
                                                         const pushedDocIds = [];
@@ -19157,7 +19163,8 @@ ${repoStr || '- *No repos configured*'}
             e.stopPropagation();
             const files = Array.from(e.dataTransfer?.files || e.target?.files || []);
             if (files.length === 0) return;
-            const repo = app.repos?.prod || app.repos?.test;
+            // Prefer test repo (development-first workflow)
+            const repo = app.repos?.test || app.testRepo || app.repos?.prod || app.prodRepo;
             if (!repo) return;
             const subPath = app.subPath || '';
             let docFiles = [];
@@ -19207,7 +19214,8 @@ ${repoStr || '- *No repos configured*'}
         
         const pushDocsToRepo = async () => {
             if (!github || uploadFiles.length === 0) return;
-            const repo = app.repos?.prod || app.repos?.test;
+            // Prefer test repo (development-first workflow)
+            const repo = app.repos?.test || app.testRepo || app.repos?.prod || app.prodRepo;
             if (!repo) return;
             setUploading(true);
             setUploadLog([]);
@@ -19756,7 +19764,7 @@ ${repoStr || '- *No repos configured*'}
                                         ))}
                                         {!uploading && uploadLog.length === 0 && (
                                             <button onClick={pushDocsToRepo} className="w-full py-2.5 rounded-lg font-medium flex items-center justify-center gap-2 transition-colors bg-green-600 hover:bg-green-500 text-white">
-                                                \ud83d\ude80 Push {uploadFiles.length} file{uploadFiles.length > 1 ? 's' : ''} to {app.repos?.prod?.split('/').pop() || 'repo'}
+                                                \ud83d\ude80 Push {uploadFiles.length} file{uploadFiles.length > 1 ? 's' : ''} to {(app.repos?.test || app.testRepo || app.repos?.prod || app.prodRepo || 'repo').split('/').pop()}
                                             </button>
                                         )}
                                         {uploading && (
