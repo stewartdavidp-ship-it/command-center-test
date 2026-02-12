@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Command Center</title>
-    <meta name="version" content="8.56.2">
+    <meta name="version" content="8.56.3">
     <meta name="gs-app-id" content="command-center">
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -6354,7 +6354,7 @@
                                 cleanPath = relativePath.substring(rootFolder.length);
                             }
                             
-                            const fileName = cleanPath.split('/').pop();
+                            let fileName = cleanPath.split('/').pop();
                             const isText = /\.(html|js|css|json|md|txt|xml|svg|yml|yaml)$/i.test(fileName);
                             
                             // Determine target path - preserve directory structure for non-HTML files
@@ -6396,8 +6396,16 @@
                                         suggestedApp = parsed.app;
                                     }
                                     
+                                    // Detect CLAUDE.md regardless of zip filename
+                                    const detectedName = detectClaudeMd(fileName, isText ? content : null);
+                                    if (detectedName !== fileName) {
+                                        cleanPath = cleanPath.replace(fileName, detectedName);
+                                        targetPath = targetPath === fileName ? detectedName : targetPath.replace(fileName, detectedName);
+                                        fileName = detectedName;
+                                    }
+
                                     console.log('Extracted:', cleanPath, '→', targetPath, 'v' + version);
-                                    
+
                                     const fileAction = classifyFileAction(fileName);
                                     if (fileAction === 'skip') {
                                         // Phase B: Capture SESSION_RETURN.json before skipping
@@ -6580,6 +6588,8 @@
                         cleanedName = claudeMatch[1] + claudeMatch[2];
                         console.log('Cleaned filename:', file.name, '→', cleanedName);
                     }
+                    // Detect CLAUDE.md regardless of upload filename (e.g., Claude-2.md)
+                    cleanedName = detectClaudeMd(cleanedName, isText ? content : null);
                     
                     // Determine targetPath: use app-specific path if detected, else default logic
                     let targetPath;
@@ -11137,7 +11147,19 @@
         const primaryProject = Object.entries(projectHits).sort((a, b) => b[1] - a[1])[0]?.[0] || null;
 
         for (const file of files) {
-            const relPath = file.relativePath;
+            let relPath = file.relativePath;
+            // Detect CLAUDE.md by content if filename is a .md file that isn't already CLAUDE.md
+            const baseName = relPath.split('/').pop();
+            if (/\.md$/i.test(baseName) && baseName !== 'CLAUDE.md') {
+                try {
+                    const peek = await file.entry.async('string');
+                    const detected = detectClaudeMd(relPath, peek);
+                    if (detected !== relPath) {
+                        file.relativePath = detected;
+                        relPath = detected;
+                    }
+                } catch (e) { /* binary or unreadable, skip detection */ }
+            }
             const fileAction = classifyFileAction(relPath);
             if (fileAction === 'skip') continue;
 
@@ -17547,7 +17569,32 @@ When complete, note: "Completes ${item.id}" in deploy notes.`;
     // =========================================================================
     
     // Standard doc filenames for the Claude Prep package convention
-    const CLAUDE_PREP_DOCS = ['CONTEXT.md', 'PROJECT_PLAN.md', 'CHANGELOG.md', 'RELEASE_NOTES.txt', 'ARCHITECTURE.md', 'CLAUDE-PREP-STANDARD.md', 'CLAUDE_INSTRUCTIONS.md'];
+    const CLAUDE_PREP_DOCS = ['CLAUDE.md', 'CONTEXT.md', 'PROJECT_PLAN.md', 'CHANGELOG.md', 'RELEASE_NOTES.txt', 'ARCHITECTURE.md', 'CLAUDE-PREP-STANDARD.md', 'CLAUDE_INSTRUCTIONS.md'];
+
+    // Detect if file content is a CLAUDE.md regardless of upload filename.
+    // Returns 'CLAUDE.md' if detected, otherwise returns the original filename.
+    function detectClaudeMd(fileName, content) {
+        if (!content || typeof content !== 'string') return fileName;
+        const baseName = fileName.split('/').pop();
+        // Already named correctly
+        if (baseName === 'CLAUDE.md') return fileName;
+        // Only consider .md files
+        if (!/\.md$/i.test(baseName)) return fileName;
+        // Signal 1: cc-meta tag with targetPath: CLAUDE.md (machine-generated)
+        if (/<!--\s*cc-meta[\s\S]*?targetPath:\s*CLAUDE\.md[\s\S]*?-->/.test(content.slice(0, 500))) {
+            console.log(`[ClaudeMD] Detected CLAUDE.md by cc-meta tag in "${fileName}"`);
+            return fileName.replace(baseName, 'CLAUDE.md');
+        }
+        // Signal 2: Content heuristics — heading + ODRC section markers
+        const hasHeading = /^#\s+CLAUDE\.md/m.test(content.slice(0, 200));
+        const odrcSections = ['## RULEs', '## CONSTRAINTs', '## DECISIONs', '## OPENs'];
+        const odrcHits = odrcSections.filter(s => content.includes(s)).length;
+        if (hasHeading && odrcHits >= 2) {
+            console.log(`[ClaudeMD] Detected CLAUDE.md by content heuristics in "${fileName}" (heading + ${odrcHits} ODRC sections)`);
+            return fileName.replace(baseName, 'CLAUDE.md');
+        }
+        return fileName;
+    }
     
     // =========================================================================
     // SESSION_RETURN.json — Validation & Session Matching (Phase B)
