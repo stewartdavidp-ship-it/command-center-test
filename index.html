@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Command Center</title>
-    <meta name="version" content="8.60.0">
+    <meta name="version" content="8.60.1">
     <meta name="gs-app-id" content="command-center">
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -873,7 +873,7 @@
         ],
         
         // Keys that should never be pruned
-        PROTECTED_KEYS: ['cc_token', 'cc_token_expires', 'cc_apps_v6', 'commandCenterConfig', 'cc_firebase_sa', 'cc_firebase_uid', 'cc_collapsedProjects', 'cc_default_engine', 'cc_projectStates', 'cc_domain_config', 'cc_godaddy_config', 'cc_token_registry', 'cc_api_key', 'cc_repo_health_last', 'githubRepoAssignments', 'gs_github_token', 'gs_firebase_sa', 'gs_firebase_uid', 'gs_config', 'gs_api_key', 'gs_token_expires'],
+        PROTECTED_KEYS: ['cc_token', 'cc_token_expires', 'cc_apps_v6', 'commandCenterConfig', 'cc_firebase_sa', 'cc_firebase_uid', 'cc_collapsedProjects', 'cc_default_engine', 'cc_projectStates', 'cc_domain_config', 'cc_godaddy_config', 'cc_token_registry', 'cc_api_key', 'cc_anthropic_api_key', 'cc_repo_health_last', 'githubRepoAssignments', 'gs_github_token', 'gs_firebase_sa', 'gs_firebase_uid', 'gs_config', 'gs_api_key', 'gs_token_expires'],
         
         // Get current storage usage in bytes
         getUsage() {
@@ -2384,12 +2384,12 @@
 
     const ClaudeAPIService = {
         getApiKey() {
-            try { return localStorage.getItem('cc_api_key') || ''; } catch { return ''; }
+            try { return localStorage.getItem('cc_anthropic_api_key') || ''; } catch { return ''; }
         },
         isConfigured() { return !!this.getApiKey(); },
         async call({ model = 'claude-haiku-4-5-20251001', system, userMessage, maxTokens = 4096 }) {
             const apiKey = this.getApiKey();
-            if (!apiKey) throw new Error('Claude API key not configured. Set it in Settings.');
+            if (!apiKey) throw new Error('Anthropic API key not configured. Go to Settings → Anthropic API Key to add it.');
             const response = await fetch('https://api.anthropic.com/v1/messages', {
                 method: 'POST',
                 headers: {
@@ -17596,7 +17596,7 @@ When complete, note: "Completes ${item.id}" in deploy notes.`;
         // Package for Check — opens bundle assembly modal
         const handlePackageForCheck = async (job) => {
             if (!ClaudeAPIService.isConfigured()) {
-                await showAlert('Claude API key not configured. Go to Settings to add your Anthropic API key.', '🔑 API Key Required');
+                await showAlert('Anthropic API key not configured. Go to Settings → Anthropic API Key to add your key from console.anthropic.com.', '🔑 API Key Required');
                 return;
             }
             if (!github) {
@@ -17749,7 +17749,7 @@ When complete, note: "Completes ${item.id}" in deploy notes.`;
         const executeBatchClassification = async () => {
             if (!batchModal || !github) return;
             if (!ClaudeAPIService.isConfigured()) {
-                await showAlert('Claude API key not configured. Go to Settings to add your Anthropic API key.', '🔑 API Key Required');
+                await showAlert('Anthropic API key not configured. Go to Settings → Anthropic API Key to add your key from console.anthropic.com.', '🔑 API Key Required');
                 return;
             }
             const selectedJobs = batchModal.jobs.filter(j => batchModal.selectedIds.has(j.id));
@@ -23764,6 +23764,50 @@ The developer uses Claude for iterative development — each session should:
                     )}
                 </div>
                 
+                {/* Anthropic API Key (v8.60.1 — Bug Fix) */}
+                {(() => {
+                    const [apiKeyVal, setApiKeyVal] = React.useState(() => {
+                        try { return localStorage.getItem('cc_anthropic_api_key') || ''; } catch { return ''; }
+                    });
+                    const [showKey, setShowKey] = React.useState(false);
+                    const [saved, setSaved] = React.useState(false);
+                    return (
+                        <div className="bg-slate-800 rounded-xl border border-slate-700 p-6">
+                            <h2 className="text-lg font-semibold mb-2 flex items-center gap-2">🔑 Anthropic API Key</h2>
+                            <p className="text-sm text-slate-400 mb-1">Required for AI-generated review prompts in the validation bundle pipeline.</p>
+                            <p className="text-xs text-slate-500 mb-4">Get your key from <a href="https://console.anthropic.com/" target="_blank" rel="noopener" className="text-indigo-400 hover:underline">console.anthropic.com</a>. Stored in localStorage only — never sent to Firebase.</p>
+                            <div className="flex items-center gap-2 mb-2">
+                                <input type={showKey ? 'text' : 'password'} value={apiKeyVal}
+                                    onChange={e => { setApiKeyVal(e.target.value); setSaved(false); }}
+                                    placeholder="sk-ant-api03-..."
+                                    className="bg-slate-700 border border-slate-600 rounded px-3 py-1.5 text-sm flex-1 font-mono" />
+                                <button onClick={() => setShowKey(!showKey)}
+                                    className="px-2 py-1.5 rounded text-xs bg-slate-700 hover:bg-slate-600">
+                                    {showKey ? '🙈 Hide' : '👁 Show'}
+                                </button>
+                                <button onClick={() => { localStorage.setItem('cc_anthropic_api_key', apiKeyVal); setSaved(true); }}
+                                    disabled={saved}
+                                    className="px-3 py-1.5 rounded text-xs bg-indigo-600 hover:bg-indigo-500 font-medium disabled:opacity-50">
+                                    {saved ? '✓ Saved' : 'Save'}
+                                </button>
+                                {apiKeyVal && (
+                                    <button onClick={() => { localStorage.removeItem('cc_anthropic_api_key'); setApiKeyVal(''); setSaved(false); }}
+                                        className="px-2 py-1.5 rounded text-xs bg-red-900/50 hover:bg-red-800 text-red-300">
+                                        Clear
+                                    </button>
+                                )}
+                            </div>
+                            <div className="text-xs">
+                                {apiKeyVal ? (
+                                    <span className="text-green-400">✅ Configured — review prompts will use Claude API</span>
+                                ) : (
+                                    <span className="text-amber-400">⚠️ Not set — review prompt generation will use static fallback</span>
+                                )}
+                            </div>
+                        </div>
+                    );
+                })()}
+
                 {/* Completion Files Settings (v8.58.0 — Ingestion Pipeline) */}
                 <div className="bg-slate-800 rounded-xl border border-slate-700 p-6">
                     <h2 className="text-lg font-semibold mb-2 flex items-center gap-2">📦 Completion Files</h2>
