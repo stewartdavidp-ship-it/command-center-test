@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Command Center</title>
-    <meta name="version" content="8.60.1">
+    <meta name="version" content="8.61.0">
     <meta name="gs-app-id" content="command-center">
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -3250,6 +3250,185 @@
     };
     
     // =========================================================================
+    // IDEATION BRIEF GENERATOR (v8.61.0 — Idea-to-Chat Pipeline)
+    // =========================================================================
+
+    const IdeationBriefGenerator = {
+        SYSTEM_PROMPT: `You are generating a session brief for a structured ideation conversation.
+The brief will be uploaded to Claude Chat along with a standardized prompt.
+Generate a markdown document with these sections:
+- Session header (idea name, app, session number, current version)
+- "What are you looking to get out of today's session?" — ask the developer to state their goal
+- Idea Summary — what this idea is about
+- Prior Session Summary — if sessions exist, summarize the most recent
+- Current ODRC State — all active concepts grouped by type (OPEN, DECISION, RULE, CONSTRAINT)
+- Expected Output Format — the ODRC Updates format with header metadata block:
+  ## ODRC Updates
+  # Idea: {idea-slug}
+  # Session: {session-number}
+  # App: {app-id}
+  Followed by lines using: NEW DECISION/OPEN/RULE/CONSTRAINT and RESOLVE OPEN formats
+- Supporting Documents — note what else is in the zip
+
+Frame everything in ODRC terms. The brief should make it easy for Chat to pick up context and produce structured ODRC output at session end.`,
+
+        // Main entry point — generates the session brief markdown
+        async generate(idea, app, concepts, globalConcepts) {
+            const ideaContext = this.buildIdeaContext(idea, concepts);
+            const appContext = this.buildAppContext(app, globalConcepts);
+            const odrcState = ODRCSummaryGenerator.generateScoped(concepts, [idea], null);
+
+            try {
+                const brief = await ClaudeAPIService.call({
+                    model: 'claude-sonnet-4-20250514',
+                    system: this.SYSTEM_PROMPT,
+                    userMessage: this.buildUserMessage(ideaContext, appContext, odrcState),
+                    maxTokens: 4096
+                });
+                return brief;
+            } catch (e) {
+                console.warn('[CC] IdeationBriefGenerator: AI generation failed, using template fallback:', e.message);
+                return this.buildTemplateBrief(idea, app, concepts, ideaContext, appContext, odrcState);
+            }
+        },
+
+        buildIdeaContext(idea, concepts) {
+            const activeConcepts = concepts.filter(c => c.status === 'active');
+            const sessionCount = idea.sessionLog?.length || 0;
+            const latestSession = sessionCount > 0 ? idea.sessionLog[sessionCount - 1] : null;
+            const computed = computeIdeaPhase(concepts);
+            const phase = idea.phase || computed;
+
+            return {
+                name: idea.name,
+                slug: idea.slug || IdeaManager.generateSlug(idea.name),
+                description: idea.description || '',
+                phase,
+                computedPhase: computed,
+                manualPhase: idea.phase,
+                sessionCount,
+                latestSession,
+                sessionLog: idea.sessionLog || [],
+                conceptCounts: {
+                    total: activeConcepts.length,
+                    opens: activeConcepts.filter(c => c.type === 'OPEN').length,
+                    decisions: activeConcepts.filter(c => c.type === 'DECISION').length,
+                    rules: activeConcepts.filter(c => c.type === 'RULE').length,
+                    constraints: activeConcepts.filter(c => c.type === 'CONSTRAINT').length
+                }
+            };
+        },
+
+        buildAppContext(app, globalConcepts) {
+            if (!app) return { name: 'Unknown', description: '', version: '' };
+            return {
+                name: app.name || app.id,
+                description: app.description || '',
+                version: app.version || '',
+                id: app.id
+            };
+        },
+
+        buildUserMessage(ideaContext, appContext, odrcState) {
+            const sessionNum = ideaContext.sessionCount + 1;
+            let msg = `Generate a session brief for:\n\n`;
+            msg += `**Idea:** ${ideaContext.name}\n`;
+            msg += `**App:** ${appContext.name}\n`;
+            msg += `**Session Number:** ${sessionNum}\n`;
+            msg += `**Idea Slug:** ${ideaContext.slug}\n`;
+            msg += `**Phase:** ${ideaContext.phase}\n\n`;
+            msg += `**Idea Description:**\n${ideaContext.description}\n\n`;
+
+            if (ideaContext.latestSession) {
+                msg += `**Most Recent Session:**\n`;
+                msg += `- ID: ${ideaContext.latestSession.sessionId}\n`;
+                msg += `- Date: ${new Date(ideaContext.latestSession.date).toLocaleDateString()}\n`;
+                msg += `- Summary: ${ideaContext.latestSession.summary}\n`;
+                msg += `- Created: ${ideaContext.latestSession.conceptsCreated} concepts, Resolved: ${ideaContext.latestSession.conceptsResolved}\n\n`;
+            }
+
+            if (ideaContext.sessionLog.length > 1) {
+                msg += `**Full Session Log:**\n`;
+                ideaContext.sessionLog.forEach(s => {
+                    msg += `- ${s.sessionId} (${new Date(s.date).toLocaleDateString()}): ${s.summary}\n`;
+                });
+                msg += `\n`;
+                // Flag long-standing OPENs
+                msg += `Note: Flag any OPENs persisting across 2+ sessions as "long-standing".\n\n`;
+            }
+
+            msg += `**App Context:**\n`;
+            msg += `- Name: ${appContext.name}\n`;
+            msg += `- Description: ${appContext.description}\n`;
+            msg += `- Version: ${appContext.version}\n\n`;
+            msg += `**Current ODRC State:**\n${odrcState}\n\n`;
+            msg += `**Concept Counts:** ${ideaContext.conceptCounts.total} active (${ideaContext.conceptCounts.opens} OPENs, ${ideaContext.conceptCounts.decisions} DECISIONs, ${ideaContext.conceptCounts.rules} RULEs, ${ideaContext.conceptCounts.constraints} CONSTRAINTs)`;
+
+            return msg;
+        },
+
+        // Template fallback when AI is unavailable
+        buildTemplateBrief(idea, app, concepts, ideaContext, appContext, odrcState) {
+            const sessionNum = ideaContext.sessionCount + 1;
+            const slug = ideaContext.slug;
+            const appId = app?.id || 'unknown';
+
+            let brief = `# Session Brief — ${ideaContext.name} (Session ${sessionNum})\n`;
+            brief += `App: ${appContext.name} | Phase: ${ideaContext.phase} | Generated: ${new Date().toLocaleString()}\n\n`;
+            brief += `---\n\n`;
+            brief += `## What are you looking to get out of today's session?\n`;
+            brief += `*(State your goal for this session)*\n\n`;
+            brief += `---\n\n`;
+            brief += `## Idea Summary\n`;
+            brief += `${ideaContext.description || 'No description set.'}\n\n`;
+
+            if (ideaContext.latestSession) {
+                brief += `## Prior Session Summary\n`;
+                brief += `**${ideaContext.latestSession.sessionId}** (${new Date(ideaContext.latestSession.date).toLocaleDateString()}):\n`;
+                brief += `${ideaContext.latestSession.summary}\n`;
+                brief += `Created ${ideaContext.latestSession.conceptsCreated} concepts, resolved ${ideaContext.latestSession.conceptsResolved}.\n\n`;
+            }
+
+            if (ideaContext.sessionLog.length > 1) {
+                brief += `## Session History\n`;
+                brief += `| Session | Date | Summary | Created | Resolved |\n`;
+                brief += `|---------|------|---------|---------|----------|\n`;
+                ideaContext.sessionLog.forEach(s => {
+                    brief += `| ${s.sessionId} | ${new Date(s.date).toLocaleDateString()} | ${s.summary} | ${s.conceptsCreated} | ${s.conceptsResolved} |\n`;
+                });
+                brief += `\n`;
+            }
+
+            brief += `## Current ODRC State\n\n`;
+            brief += odrcState + '\n\n';
+            brief += `## Expected Output Format\n\n`;
+            brief += `At the end of this session, produce structured ODRC updates using this format:\n\n`;
+            brief += `\`\`\`\n`;
+            brief += `## ODRC Updates\n`;
+            brief += `# Idea: ${slug}\n`;
+            brief += `# Session: S-${new Date().toISOString().slice(0, 10).replace(/-/g, '-')}-${String(sessionNum).padStart(3, '0')}\n`;
+            brief += `# App: ${appId}\n\n`;
+            brief += `- NEW DECISION: "description"\n`;
+            brief += `- NEW OPEN: "description"\n`;
+            brief += `- RESOLVE OPEN: "description" → matched to concept_id {id}\n`;
+            brief += `\`\`\`\n\n`;
+            brief += `## Supporting Documents\n`;
+            brief += `Check the zip package for additional files included with this brief.\n`;
+
+            return brief;
+        },
+
+        // Standardized handshake prompt — three variable slots only
+        getHandshakePrompt(ideaName, sessionNumber, appName) {
+            return `Please review the attached session brief and supporting documents for ${ideaName} (Session ${sessionNumber}, App: ${appName}).
+
+Confirm you've reviewed the materials, then ask me what I want to accomplish in this session.
+
+Frame all exploration using the ODRC model (OPENs, Decisions, Rules, Constraints). At the end of the session, produce a structured ODRC Updates section using the format defined in the brief.`;
+        }
+    };
+
+    // =========================================================================
     // END DATA SERVICE LAYER
     // =========================================================================
     
@@ -5399,6 +5578,43 @@
             return firebaseDb.ref(`command-center/${uid}/ideas`);
         },
 
+        // Generate kebab-case slug from idea name
+        generateSlug(name) {
+            return name
+                .toLowerCase()
+                .replace(/[^a-z0-9\s-]/g, '')
+                .replace(/\s+/g, '-')
+                .replace(/-+/g, '-')
+                .substring(0, 60);
+        },
+
+        // Generate unique slug within an app scope
+        async _uniqueSlug(uid, name, appId) {
+            const base = this.generateSlug(name);
+            if (!appId) return base;
+            const appIdeas = await this.getByApp(uid, appId);
+            const existing = appIdeas.map(i => i.slug).filter(Boolean);
+            if (!existing.includes(base)) return base;
+            let counter = 2;
+            while (existing.includes(`${base}-${counter}`)) counter++;
+            return `${base}-${counter}`;
+        },
+
+        // Add session log entry — call after ODRC import
+        async addSessionLogEntry(uid, ideaId, { sessionId, date, docPath, summary, conceptsCreated, conceptsResolved }) {
+            const snapshot = await this._ref(uid).child(ideaId).once('value');
+            const idea = snapshot.val();
+            if (!idea) throw new Error(`Idea not found: ${ideaId}`);
+            const sessionLog = idea.sessionLog || [];
+            sessionLog.push({ sessionId, date, docPath, summary, conceptsCreated, conceptsResolved });
+            await this._ref(uid).child(ideaId).update({
+                sessionLog,
+                lastSessionDate: date,
+                updatedAt: new Date().toISOString()
+            });
+            console.log('[CC] Added session log entry:', sessionId, 'to idea:', ideaId);
+        },
+
         // Create a new idea
         async create(uid, { name, description, type = 'base', appId = null, parentIdeaId = null }) {
             if (!IDEA_TYPES.includes(type)) {
@@ -5412,17 +5628,24 @@
                 sequence = appIdeas.length > 0 ? Math.max(...appIdeas.map(i => i.sequence || 0)) + 1 : 1;
             }
 
+            // Auto-generate unique slug
+            const slug = await this._uniqueSlug(uid, name, appId);
+
             const ref = this._ref(uid).push();
             const now = new Date().toISOString();
             const idea = {
                 id: ref.key,
                 name,
                 description,
+                slug,
                 type,
                 appId,
                 parentIdeaId,
                 sequence,
                 status: 'active',
+                sessionLog: [],
+                lastSessionDate: null,
+                phase: null,
                 createdAt: now,
                 updatedAt: now
             };
@@ -5460,7 +5683,7 @@
 
         // Update editable fields of an idea
         async update(uid, ideaId, updates) {
-            const allowed = ['name', 'description', 'status'];
+            const allowed = ['name', 'description', 'status', 'slug', 'phase'];
             const filtered = {};
             for (const key of allowed) {
                 if (updates[key] !== undefined) filtered[key] = updates[key];
@@ -5566,6 +5789,34 @@
             return () => ref.off('value', handler);
         }
     };
+
+    // Compute idea phase from ODRC concept state (standalone utility)
+    // Returns 'exploring', 'converging', or 'spec-ready'
+    // If idea has a manual phase override (non-null), use that instead
+    function computeIdeaPhase(concepts) {
+        const active = concepts.filter(c => c.status === 'active');
+        const opens = active.filter(c => c.type === 'OPEN').length;
+        const decisions = active.filter(c => c.type === 'DECISION').length;
+        const rules = active.filter(c => c.type === 'RULE').length;
+        const constraints = active.filter(c => c.type === 'CONSTRAINT').length;
+
+        // Check spec-ready first (highest priority)
+        if (opens === 0 || (opens <= 2 && decisions >= 10)) return 'spec-ready';
+        // Then converging
+        if (decisions >= opens && (rules > 0 || constraints > 0)) return 'converging';
+        // Default
+        return 'exploring';
+    }
+
+    // Generate session ID in S-YYYY-MM-DD-NNN format
+    function generateSessionId(sessionNumber) {
+        const now = new Date();
+        const y = now.getFullYear();
+        const m = String(now.getMonth() + 1).padStart(2, '0');
+        const d = String(now.getDate()).padStart(2, '0');
+        const n = String(sessionNumber).padStart(3, '0');
+        return `S-${y}-${m}-${d}-${n}`;
+    }
 
     // =========================================================================
     // COMPLETION FILE SERVICE (v8.58.0 — Ingestion Pipeline Phase 1)
@@ -16812,7 +17063,7 @@ When complete, note: "Completes ${item.id}" in deploy notes.`;
     }
 
     // =========================================================================
-    // IDEAS VIEW — ODRC Concept Management + CLAUDE.md Generation (v8.57.0)
+    // IDEAS VIEW — ODRC Concept Management + CLAUDE.md Generation + Idea-to-Chat (v8.61.0)
     // =========================================================================
 
     function IdeasView({ apps, globalIdeas, globalConcepts, firebaseUid, showAlert, showConfirm, showPrompt, config, setView, github }) {
@@ -16822,6 +17073,8 @@ When complete, note: "Completes ${item.id}" in deploy notes.`;
         const [showEditModal, setShowEditModal] = React.useState(null); // null | { concept, isNew, defaultIdeaId }
         const [showTransitionModal, setShowTransitionModal] = React.useState(null); // null | { concept, targetType }
         const [showGenerateModal, setShowGenerateModal] = React.useState(false);
+        const [showExploreModal, setShowExploreModal] = React.useState(null); // null | { ideaId }
+        const [sessionHistoryExpanded, setSessionHistoryExpanded] = React.useState(false);
         const [typeFilter, setTypeFilter] = React.useState('all');
         const [statusFilter, setStatusFilter] = React.useState('active');
         const [appFilter, setAppFilter] = React.useState('all');
@@ -17226,6 +17479,200 @@ When complete, note: "Completes ${item.id}" in deploy notes.`;
             );
         };
 
+        // === ExploreInChatModal (v8.61.0 — Idea-to-Chat Pipeline) ===
+        const ExploreInChatModal = ({ idea, onClose }) => {
+            const app = idea.appId ? (configuredApps.find(a => a.id === idea.appId) || apps[idea.appId]) : null;
+            const concepts = globalConcepts.filter(c => c.ideaOrigin === idea.id);
+            const sessionNum = (idea.sessionLog?.length || 0) + 1;
+            const slug = idea.slug || IdeaManager.generateSlug(idea.name);
+            const computed = computeIdeaPhase(concepts);
+            const phase = idea.phase || computed;
+
+            const [briefText, setBriefText] = React.useState(null);
+            const [generating, setGenerating] = React.useState(false);
+            const [pushing, setPushing] = React.useState(false);
+            const [error, setError] = React.useState(null);
+            const [includeCodebase, setIncludeCodebase] = React.useState(phase === 'converging' || phase === 'spec-ready');
+
+            const sizeThreshold = 8000;
+            const isLargeBrief = briefText && briefText.length >= sizeThreshold;
+
+            // Auto-generate brief on mount
+            React.useEffect(() => {
+                let cancelled = false;
+                (async () => {
+                    setGenerating(true);
+                    setError(null);
+                    try {
+                        const result = await IdeationBriefGenerator.generate(idea, app, concepts, globalConcepts);
+                        if (!cancelled) setBriefText(result);
+                    } catch (e) {
+                        if (!cancelled) setError(e.message);
+                    }
+                    if (!cancelled) setGenerating(false);
+                })();
+                return () => { cancelled = true; };
+            }, [idea.id]);
+
+            const handshakePrompt = IdeationBriefGenerator.getHandshakePrompt(idea.name, sessionNum, app?.name || 'Unknown');
+
+            const copyPrompt = async () => {
+                try {
+                    await navigator.clipboard.writeText(handshakePrompt);
+                    await showAlert('Handshake prompt copied to clipboard', '📋 Copied');
+                } catch (e) { await showAlert('Copy failed: ' + e.message, '❌ Error'); }
+            };
+
+            const copyBrief = async () => {
+                if (!briefText) return;
+                try {
+                    await navigator.clipboard.writeText(briefText);
+                    await showAlert('Session brief copied to clipboard', '📋 Copied');
+                } catch (e) { await showAlert('Copy failed: ' + e.message, '❌ Error'); }
+            };
+
+            const downloadZip = async () => {
+                if (!briefText) return;
+                try {
+                    const zip = new JSZip();
+                    const briefFilename = `CC-Session-Brief-${idea.name.replace(/[^a-zA-Z0-9]/g, '-')}-S${String(sessionNum).padStart(3, '0')}.md`;
+                    zip.file(briefFilename, briefText);
+
+                    // Include previous session's ODRC output if exists
+                    if (idea.sessionLog?.length > 0 && github) {
+                        const latestSession = idea.sessionLog[idea.sessionLog.length - 1];
+                        if (latestSession.docPath) {
+                            const repo = app?.repos?.test || app?.testRepo || app?.repos?.prod || app?.prodRepo;
+                            if (repo) {
+                                try {
+                                    const file = await github.getFile(repo, latestSession.docPath);
+                                    if (file?.content) {
+                                        zip.file(`ODRC-Updates-${slug}-latest.md`, atob(file.content));
+                                    }
+                                } catch (e) {
+                                    console.log('[CC] Could not fetch previous session doc:', e.message);
+                                }
+                            }
+                        }
+                    }
+
+                    const blob = await zip.generateAsync({ type: 'blob' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `session-brief-${slug}-S${String(sessionNum).padStart(3, '0')}.zip`;
+                    a.click();
+                    URL.revokeObjectURL(url);
+                    console.log('[CC] Downloaded session brief zip for', idea.name);
+                } catch (e) { await showAlert('Download failed: ' + e.message, '❌ Error'); }
+            };
+
+            const pushToRepo = async () => {
+                if (!briefText || !github || !app) return;
+                const repo = app.repos?.test || app.testRepo || app.repos?.prod || app.prodRepo;
+                if (!repo) { await showAlert('No repo configured for this app', '⚠️ No Repo'); return; }
+                setPushing(true);
+                try {
+                    const sessionId = generateSessionId(sessionNum);
+                    const path = `docs/sessions/${slug}/${sessionId}.md`;
+                    const existing = await github.getFile(repo, path).catch(() => null);
+                    await github.createOrUpdateFile(repo, path, briefText,
+                        `Add session brief: ${idea.name} ${sessionId}`, existing?.sha || null);
+                    await showAlert(`Brief pushed to ${repo}/${path}`, '✅ Pushed');
+                    console.log('[CC] Pushed session brief to', repo, path);
+                } catch (e) { await showAlert(`Push failed: ${e.message}`, '❌ Error'); }
+                setPushing(false);
+            };
+
+            const briefSizeKB = briefText ? (briefText.length / 1024).toFixed(1) : '...';
+
+            return (
+                <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4" onClick={onClose}>
+                    <div className="bg-slate-800 rounded-xl border border-slate-700 w-full max-w-3xl max-h-[85vh] flex flex-col" onClick={e => e.stopPropagation()}>
+                        <div className="flex items-center justify-between p-4 border-b border-slate-700">
+                            <h2 className="text-lg font-bold">🗣️ Explore in Chat — {idea.name} (Session {sessionNum})</h2>
+                            <button onClick={onClose} className="text-slate-400 hover:text-white text-xl">✕</button>
+                        </div>
+                        <div className="flex-1 overflow-y-auto p-4">
+                            {generating && (
+                                <div className="text-center py-8">
+                                    <div className="text-3xl mb-3 animate-pulse">🧠</div>
+                                    <p className="text-slate-400">Generating session brief...</p>
+                                </div>
+                            )}
+                            {error && (
+                                <div className="bg-red-900/30 border border-red-800 rounded-lg p-3 mb-4 text-sm text-red-300">
+                                    ❌ {error}
+                                </div>
+                            )}
+                            {briefText && (
+                                <pre className="text-sm text-slate-300 whitespace-pre-wrap font-mono bg-slate-900 rounded-lg p-4 border border-slate-700 max-h-[40vh] overflow-y-auto">{briefText}</pre>
+                            )}
+
+                            {/* Package contents */}
+                            <div className="mt-4 bg-slate-900/50 rounded-lg p-3 border border-slate-700">
+                                <h3 className="text-sm font-medium text-slate-300 mb-2">Included in package:</h3>
+                                <div className="space-y-1 text-sm">
+                                    <div className="flex items-center gap-2">
+                                        <span className="text-green-400">✓</span>
+                                        <span className="text-slate-300">Session brief ({briefSizeKB} KB)</span>
+                                    </div>
+                                    {idea.sessionLog?.length > 0 ? (
+                                        <div className="flex items-center gap-2">
+                                            <span className="text-green-400">✓</span>
+                                            <span className="text-slate-300">Previous ODRC updates</span>
+                                        </div>
+                                    ) : (
+                                        <div className="flex items-center gap-2">
+                                            <span className="text-slate-500">○</span>
+                                            <span className="text-slate-500">No prior sessions</span>
+                                        </div>
+                                    )}
+                                    <div className="flex items-center gap-2">
+                                        <label className="flex items-center gap-2 cursor-pointer">
+                                            <input type="checkbox" checked={includeCodebase} onChange={e => setIncludeCodebase(e.target.checked)}
+                                                className="rounded bg-slate-700 border-slate-600" />
+                                            <span className={includeCodebase ? 'text-slate-300' : 'text-slate-500'}>
+                                                CC codebase {!includeCodebase && `(not included — phase: ${phase})`}
+                                            </span>
+                                        </label>
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* Phase info */}
+                            <div className="mt-3 flex items-center gap-2 text-xs text-slate-500">
+                                <span>Phase:</span>
+                                <span className={`px-1.5 py-0.5 rounded ${
+                                    phase === 'exploring' ? 'bg-blue-900/50 text-blue-300' :
+                                    phase === 'converging' ? 'bg-amber-900/50 text-amber-300' :
+                                    'bg-green-900/50 text-green-300'
+                                }`}>{phase}</span>
+                                {idea.phase && idea.phase !== computed && (
+                                    <span className="text-amber-400" title={`Computed: ${computed}, Manual override: ${idea.phase}`}>⚠ phase mismatch</span>
+                                )}
+                            </div>
+                        </div>
+                        <div className="flex gap-2 p-4 border-t border-slate-700 justify-end flex-wrap">
+                            <button onClick={copyPrompt}
+                                className="px-4 py-2 rounded text-sm bg-slate-700 hover:bg-slate-600 font-medium">📋 Copy Prompt</button>
+                            {isLargeBrief || idea.sessionLog?.length > 0 ? (
+                                <button onClick={downloadZip} disabled={!briefText}
+                                    className="px-4 py-2 rounded text-sm bg-indigo-600 hover:bg-indigo-500 font-medium disabled:opacity-50">📦 Download Zip</button>
+                            ) : (
+                                <button onClick={copyBrief} disabled={!briefText}
+                                    className="px-4 py-2 rounded text-sm bg-indigo-600 hover:bg-indigo-500 font-medium disabled:opacity-50">📋 Copy Brief</button>
+                            )}
+                            <button onClick={pushToRepo} disabled={pushing || !briefText}
+                                className="px-4 py-2 rounded text-sm bg-green-700 hover:bg-green-600 font-medium disabled:opacity-50">
+                                {pushing ? '⏳ Pushing...' : '🚀 Push to Repo'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
         // === Auth guard ===
         if (!firebaseUid) {
             return (
@@ -17373,17 +17820,26 @@ When complete, note: "Completes ${item.id}" in deploy notes.`;
                             <div className="mb-4">
                                 <h2 className="text-sm font-medium text-slate-400 mb-2">Idea History</h2>
                                 <div className="flex gap-2 flex-wrap">
-                                    {appIdeas.map((idea, idx) => (
-                                        <button key={idea.id} onClick={() => navigateToIdea(idea.id)}
-                                            className={`px-3 py-1.5 rounded-lg text-sm border transition-colors ${
-                                                idea.status === 'active' ? 'border-indigo-600 bg-indigo-900/30 text-indigo-300' :
-                                                idea.status === 'graduated' ? 'border-green-700 bg-green-900/20 text-green-400' :
-                                                'border-slate-700 bg-slate-800 text-slate-400'
-                                            }`}>
-                                            <span className="font-medium">{idx + 1}.</span> {idea.name}
-                                            <span className="text-xs ml-1 opacity-60">({idea.status})</span>
-                                        </button>
-                                    ))}
+                                    {appIdeas.map((idea, idx) => {
+                                        const ideaCpts = globalConcepts.filter(c => c.ideaOrigin === idea.id);
+                                        const phase = idea.phase || computeIdeaPhase(ideaCpts);
+                                        return (
+                                            <button key={idea.id} onClick={() => navigateToIdea(idea.id)}
+                                                className={`px-3 py-1.5 rounded-lg text-sm border transition-colors ${
+                                                    idea.status === 'active' ? 'border-indigo-600 bg-indigo-900/30 text-indigo-300' :
+                                                    idea.status === 'graduated' ? 'border-green-700 bg-green-900/20 text-green-400' :
+                                                    'border-slate-700 bg-slate-800 text-slate-400'
+                                                }`}>
+                                                <span className="font-medium">{idx + 1}.</span> {idea.name}
+                                                <span className="text-xs ml-1 opacity-60">({idea.status})</span>
+                                                <span className={`ml-1 px-1 py-0.5 rounded text-[10px] ${
+                                                    phase === 'exploring' ? 'bg-blue-900/50 text-blue-300' :
+                                                    phase === 'converging' ? 'bg-amber-900/50 text-amber-300' :
+                                                    'bg-green-900/50 text-green-300'
+                                                }`}>{phase}</span>
+                                            </button>
+                                        );
+                                    })}
                                 </div>
                             </div>
                         )}
@@ -17417,12 +17873,45 @@ When complete, note: "Completes ${item.id}" in deploy notes.`;
                                         'bg-slate-700 text-slate-400'
                                     }`}>{selectedIdea.status}</span>
                                     <span className="px-2 py-0.5 bg-slate-700 rounded text-xs text-slate-400">{selectedIdea.type}</span>
+                                    {(() => {
+                                        const ideaConceptsForPhase = globalConcepts.filter(c => c.ideaOrigin === selectedIdea.id);
+                                        const computed = computeIdeaPhase(ideaConceptsForPhase);
+                                        const phase = selectedIdea.phase || computed;
+                                        const mismatch = selectedIdea.phase && selectedIdea.phase !== computed;
+                                        return (
+                                            <React.Fragment>
+                                                <span className={`px-2 py-0.5 rounded text-xs ${
+                                                    phase === 'exploring' ? 'bg-blue-900/50 text-blue-300' :
+                                                    phase === 'converging' ? 'bg-amber-900/50 text-amber-300' :
+                                                    'bg-green-900/50 text-green-300'
+                                                }`}>{phase}</span>
+                                                {mismatch && <span className="text-amber-400 text-xs" title={`Computed: ${computed}, Override: ${selectedIdea.phase}`}>⚠</span>}
+                                            </React.Fragment>
+                                        );
+                                    })()}
                                 </h1>
-                                {selectedIdea.description && <p className="text-sm text-slate-400 mt-1">{selectedIdea.description}</p>}
+                                <div className="flex items-center gap-3 mt-1">
+                                    {selectedIdea.description && <p className="text-sm text-slate-400">{selectedIdea.description}</p>}
+                                    {selectedIdea.slug && <span className="text-xs text-slate-500 font-mono">{selectedIdea.slug}</span>}
+                                    {selectedIdea.lastSessionDate && (
+                                        <span className={`text-xs ${
+                                            Date.now() - new Date(selectedIdea.lastSessionDate).getTime() > 14 * 24 * 60 * 60 * 1000 ? 'text-amber-400' : 'text-slate-500'
+                                        }`}>
+                                            Last session: {new Date(selectedIdea.lastSessionDate).toLocaleDateString()}
+                                            {Date.now() - new Date(selectedIdea.lastSessionDate).getTime() > 14 * 24 * 60 * 60 * 1000 &&
+                                                globalConcepts.filter(c => c.ideaOrigin === selectedIdea.id && c.type === 'OPEN' && c.status === 'active').length > 0 &&
+                                                ' ⚠ stale'}
+                                        </span>
+                                    )}
+                                </div>
                             </div>
                             <div className="flex gap-2">
                                 <button onClick={() => setShowEditModal({ concept: null, isNew: true, defaultIdeaId: selectedIdea.id })}
                                     className="px-3 py-1.5 rounded text-sm bg-indigo-600 hover:bg-indigo-500 font-medium">+ Add Concept</button>
+                                {selectedIdea.status === 'active' && (
+                                    <button onClick={() => setShowExploreModal({ ideaId: selectedIdea.id })}
+                                        className="px-3 py-1.5 rounded text-sm bg-purple-700 hover:bg-purple-600 font-medium">🗣️ Explore in Chat</button>
+                                )}
                                 {selectedIdea.status === 'active' && !selectedIdea.appId && (
                                     <button onClick={() => graduateIdea(selectedIdea.id)}
                                         className="px-3 py-1.5 rounded text-sm bg-green-700 hover:bg-green-600">🎓 Graduate</button>
@@ -17433,6 +17922,30 @@ When complete, note: "Completes ${item.id}" in deploy notes.`;
                                 )}
                             </div>
                         </div>
+
+                        {/* Session History (collapsible) */}
+                        {selectedIdea.sessionLog?.length > 0 && (
+                            <div className="mb-4 bg-slate-800/50 rounded-lg border border-slate-700 p-3">
+                                <button onClick={() => setSessionHistoryExpanded(!sessionHistoryExpanded)}
+                                    className="flex items-center gap-2 w-full text-left text-sm font-medium text-slate-300">
+                                    <span>{sessionHistoryExpanded ? '▾' : '▸'}</span>
+                                    📋 Session History ({selectedIdea.sessionLog.length} session{selectedIdea.sessionLog.length !== 1 ? 's' : ''})
+                                </button>
+                                {sessionHistoryExpanded && (
+                                    <div className="mt-2 space-y-1">
+                                        {selectedIdea.sessionLog.map((s, i) => (
+                                            <div key={i} className="flex items-center gap-3 text-xs py-1 border-t border-slate-700/50">
+                                                <span className="text-indigo-400 font-mono">{s.sessionId}</span>
+                                                <span className="text-slate-500">{new Date(s.date).toLocaleDateString()}</span>
+                                                <span className="text-slate-400 flex-1">{s.summary}</span>
+                                                <span className="text-green-400">+{s.conceptsCreated}</span>
+                                                <span className="text-amber-400">-{s.conceptsResolved}</span>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+                        )}
 
                         {ideaConcepts.length === 0 ? (
                             <div className="text-center py-12">
@@ -17467,6 +17980,10 @@ When complete, note: "Completes ${item.id}" in deploy notes.`;
                 {showGenerateModal && selectedAppId && (
                     <GenerateCLAUDEModal appId={selectedAppId} onClose={() => setShowGenerateModal(false)} />
                 )}
+                {showExploreModal && (() => {
+                    const exploreIdea = globalIdeas.find(i => i.id === showExploreModal.ideaId);
+                    return exploreIdea ? <ExploreInChatModal idea={exploreIdea} onClose={() => setShowExploreModal(null)} /> : null;
+                })()}
             </div>
         );
     }
