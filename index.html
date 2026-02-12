@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Command Center</title>
-    <meta name="version" content="8.56.5">
+    <meta name="version" content="8.57.0">
     <meta name="gs-app-id" content="command-center">
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -5529,6 +5529,8 @@
         const [globalDependencyAlerts, setGlobalDependencyAlerts] = React.useState([]); // Phase 5.4: Dependency alerts
         const [teamMembers, setTeamMembers] = React.useState([]); // Phase 5.7: Team members
         const [teamMembership, setTeamMembership] = React.useState(null); // Phase 5.7: Current user's membership (null = owner)
+        const [globalConcepts, setGlobalConcepts] = React.useState([]); // Ideation: ODRC concepts
+        const [globalIdeas, setGlobalIdeas] = React.useState([]); // Ideation: Ideas
         const [firebaseUid, setFirebaseUid] = React.useState(null);
         const [firebaseUser, setFirebaseUser] = React.useState(null);
         
@@ -5546,7 +5548,9 @@
             let unsubscribeDependencyAlerts = () => {};
             let unsubscribeTeam = () => {};
             let unsubscribeTeamMembership = () => {};
-            
+            let unsubscribeConcepts = () => {};
+            let unsubscribeIdeas = () => {};
+
             const unsubscribe = firebaseAuth.onAuthStateChanged((u) => {
                 setFirebaseUser(u);
                 if (u) {
@@ -5570,6 +5574,9 @@
                     // Listen for team members via TeamService (v8.46.0 — Phase 5.7)
                     unsubscribeTeam = TeamService.listen(u.uid, setTeamMembers);
                     unsubscribeTeamMembership = TeamService.listenMemberships(u.uid, setTeamMembership);
+                    // Listen for ODRC concepts and ideas (Ideation Platform)
+                    unsubscribeConcepts = ConceptManager.listen(u.uid, setGlobalConcepts);
+                    unsubscribeIdeas = IdeaManager.listen(u.uid, setGlobalIdeas);
                 } else {
                     setFirebaseUid(null);
                     setGlobalIssues([]);
@@ -5581,6 +5588,8 @@
                     setGlobalDependencies([]);
                     setTeamMembers([]);
                     setTeamMembership(null);
+                    setGlobalConcepts([]);
+                    setGlobalIdeas([]);
                 }
             });
             
@@ -5596,6 +5605,8 @@
                 unsubscribeDependencyAlerts();
                 unsubscribeTeam();
                 unsubscribeTeamMembership();
+                unsubscribeConcepts();
+                unsubscribeIdeas();
             };
         }, []);
         
@@ -7635,7 +7646,7 @@
                                 {/* Consolidated Navigation - 4 main sections (v8.53.0) */}
                                 {[
                                     { id: 'deploy', icon: '🚀', label: 'Deploy', views: ['dashboard', 'history'] },
-                                    { id: 'plan', icon: '📋', label: 'Plan', views: ['backlog', 'projects'] },
+                                    { id: 'plan', icon: '📋', label: 'Plan', views: ['backlog', 'projects', 'ideas'] },
                                     { id: 'sessions', icon: '📝', label: 'Sessions', views: ['session'] },
                                     { id: 'settings', icon: '⚙️', label: 'Settings', views: ['config', 'setup', 'settings'] }
                                 ].map(section => (
@@ -7673,6 +7684,7 @@
                                                     {v === 'history' && '📜 Deploy History'}
                                                     {v === 'backlog' && '📋 Backlog'}
                                                     {v === 'projects' && '📂 Projects'}
+                                                    {v === 'ideas' && '💡 Ideas'}
                                                     {v === 'session' && '📝 Session Log'}
                                                     {v === 'config' && '🌍 Environments'}
 
@@ -7933,6 +7945,8 @@
                             pendingSessionReturn={pendingSessionReturn}
                             setPendingSessionReturn={setPendingSessionReturn}
                             updateApp={updateApp}
+                            globalConcepts={globalConcepts}
+                            globalIdeas={globalIdeas}
                         />
                         </>
                     )}
@@ -8007,8 +8021,13 @@
                     {view === 'backlog' && (
                         <BacklogView apps={apps} showAlert={showAlert} showConfirm={showConfirm} showPrompt={showPrompt} setView={setView} config={config} globalStreams={globalStreams} />
                     )}
-                    
-                    
+
+                    {view === 'ideas' && (
+                        <IdeasView apps={apps} globalIdeas={globalIdeas} globalConcepts={globalConcepts}
+                            firebaseUid={firebaseUid} showAlert={showAlert} showConfirm={showConfirm}
+                            showPrompt={showPrompt} config={config} setView={setView} github={github} />
+                    )}
+
                     {view === 'config' && (
                         <ConfigView 
                             config={config} 
@@ -8971,7 +8990,7 @@
     // DASHBOARD VIEW
     // =========================================================================
     
-    function DashboardView({ apps, config, stagedFiles, setStagedFiles, github, onFileDrop, onRemove, onDeploy, onBatchDeploy, onPromote, activeDeployments, removeActiveDeployment, refreshing, onUpdateStagedFile, deployingRepos, showConfirm, showAlert, showPrompt, globalIssues, globalWorkItems, globalStreams, globalSessions, globalActivity, deployments, firebaseUid, setModal, linkIssuesToVersion, setView, rollbackSnapshots, onQuickRollback, pendingSessionReturn, setPendingSessionReturn, updateApp }) {
+    function DashboardView({ apps, config, stagedFiles, setStagedFiles, github, onFileDrop, onRemove, onDeploy, onBatchDeploy, onPromote, activeDeployments, removeActiveDeployment, refreshing, onUpdateStagedFile, deployingRepos, showConfirm, showAlert, showPrompt, globalIssues, globalWorkItems, globalStreams, globalSessions, globalActivity, deployments, firebaseUid, setModal, linkIssuesToVersion, setView, rollbackSnapshots, onQuickRollback, pendingSessionReturn, setPendingSessionReturn, updateApp, globalConcepts, globalIdeas }) {
         const [selectedFileIds, setSelectedFileIds] = React.useState(new Set());
         const [deployTarget, setDeployTarget] = React.useState({ appId: 'command-center', target: 'test' });
         const [isDeploying, setIsDeploying] = React.useState(false);
@@ -10672,6 +10691,11 @@
                                                                     📋 {activeWI.length}
                                                                 </span>
                                                             )}
+                                                            {(() => {
+                                                                const aIds = (globalIdeas || []).filter(i => i.appId === app.id).map(i => i.id);
+                                                                const cnt = (globalConcepts || []).filter(c => aIds.includes(c.ideaOrigin) && c.status === 'active').length;
+                                                                return cnt > 0 ? <span className="px-1.5 py-0.5 bg-purple-900/50 text-purple-300 rounded text-xs" title={`${cnt} active concepts`}>💡 {cnt}</span> : null;
+                                                            })()}
                                                             {activeSessions.length > 0 && (
                                                                 <span className="px-1.5 py-0.5 bg-amber-900/50 text-amber-300 rounded text-xs flex items-center gap-1">
                                                                     <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse"></span>
@@ -15878,6 +15902,7 @@ When complete, note: "Completes ${item.id}" in deploy notes.`;
                                     <div className="flex items-center gap-2 mb-3">
                                         <h3 className="text-sm font-bold text-slate-300 capitalize">{groupName}</h3>
                                         <span className="text-xs text-slate-500 bg-slate-700 px-2 py-0.5 rounded-full">{items.length}</span>
+                                        <button onClick={() => setView('ideas')} className="text-xs text-indigo-400 hover:text-indigo-300 ml-auto">💡 Ideas</button>
                                     </div>
                                 )}
                                 <div className="space-y-2">
@@ -16010,7 +16035,667 @@ When complete, note: "Completes ${item.id}" in deploy notes.`;
             </div>
         );
     }
-    
+
+    // =========================================================================
+    // IDEAS VIEW — ODRC Concept Management + CLAUDE.md Generation (v8.57.0)
+    // =========================================================================
+
+    function IdeasView({ apps, globalIdeas, globalConcepts, firebaseUid, showAlert, showConfirm, showPrompt, config, setView, github }) {
+        const [mode, setMode] = React.useState('all'); // 'all' | 'app-aggregate' | 'idea-detail'
+        const [selectedAppId, setSelectedAppId] = React.useState(null);
+        const [selectedIdeaId, setSelectedIdeaId] = React.useState(null);
+        const [showEditModal, setShowEditModal] = React.useState(null); // null | { concept, isNew, defaultIdeaId }
+        const [showTransitionModal, setShowTransitionModal] = React.useState(null); // null | { concept, targetType }
+        const [showGenerateModal, setShowGenerateModal] = React.useState(false);
+        const [typeFilter, setTypeFilter] = React.useState('all');
+        const [statusFilter, setStatusFilter] = React.useState('active');
+        const [appFilter, setAppFilter] = React.useState('all');
+
+        const configuredApps = React.useMemo(() => Object.values(apps).filter(a => a.testRepo || a.prodRepo || a.repos), [apps]);
+
+        // === Type/Status styling constants ===
+        const TYPE_STYLES = {
+            'RULE':       { color: 'bg-red-900/50 text-red-300 border-red-800/50', icon: '📏' },
+            'CONSTRAINT': { color: 'bg-amber-900/50 text-amber-300 border-amber-800/50', icon: '🔒' },
+            'DECISION':   { color: 'bg-blue-900/50 text-blue-300 border-blue-800/50', icon: '🎯' },
+            'OPEN':       { color: 'bg-purple-900/50 text-purple-300 border-purple-800/50', icon: '❓' }
+        };
+        const STATUS_STYLES = {
+            'active': 'bg-green-900/50 text-green-300',
+            'superseded': 'bg-slate-700 text-slate-400 line-through',
+            'resolved': 'bg-emerald-900/50 text-emerald-300',
+            'transitioned': 'bg-indigo-900/50 text-indigo-300'
+        };
+
+        // === Computed data ===
+        const filteredConcepts = React.useMemo(() => {
+            let list = globalConcepts;
+            if (typeFilter !== 'all') list = list.filter(c => c.type === typeFilter);
+            if (statusFilter !== 'all') list = list.filter(c => c.status === statusFilter);
+            if (appFilter !== 'all') {
+                const ideaIds = globalIdeas.filter(i => i.appId === appFilter).map(i => i.id);
+                list = list.filter(c => ideaIds.includes(c.ideaOrigin));
+            }
+            return list;
+        }, [globalConcepts, typeFilter, statusFilter, appFilter, globalIdeas]);
+
+        const appIdeas = React.useMemo(() => {
+            if (!selectedAppId) return [];
+            return globalIdeas.filter(i => i.appId === selectedAppId).sort((a, b) => (a.sequence || 0) - (b.sequence || 0));
+        }, [globalIdeas, selectedAppId]);
+
+        const appActiveConcepts = React.useMemo(() => {
+            if (!selectedAppId) return [];
+            const ideaIds = appIdeas.map(i => i.id);
+            return globalConcepts.filter(c => ideaIds.includes(c.ideaOrigin) && c.status === 'active');
+        }, [globalConcepts, appIdeas, selectedAppId]);
+
+        const ideaConcepts = React.useMemo(() => {
+            if (!selectedIdeaId) return [];
+            return globalConcepts.filter(c => c.ideaOrigin === selectedIdeaId);
+        }, [globalConcepts, selectedIdeaId]);
+
+        const stats = React.useMemo(() => ({
+            total: globalConcepts.length,
+            active: globalConcepts.filter(c => c.status === 'active').length,
+            byType: ODRC_TYPES.reduce((acc, t) => { acc[t] = globalConcepts.filter(c => c.type === t && c.status === 'active').length; return acc; }, {})
+        }), [globalConcepts]);
+
+        // === CRUD operations ===
+        const createConcept = async (data) => {
+            if (!firebaseUid) return;
+            try {
+                await ConceptManager.create(firebaseUid, data);
+                setShowEditModal(null);
+                await showAlert('Concept created', '✅ Success');
+                console.log('[CC] Created concept:', data.type, data.content.slice(0, 50));
+            } catch (e) { await showAlert(`Error: ${e.message}`, '❌ Error'); }
+        };
+
+        const updateConcept = async (conceptId, updates) => {
+            if (!firebaseUid) return;
+            try {
+                await ConceptManager.update(firebaseUid, conceptId, updates);
+                setShowEditModal(null);
+                await showAlert('Concept updated', '✅ Success');
+            } catch (e) { await showAlert(`Error: ${e.message}`, '❌ Error'); }
+        };
+
+        const deleteConcept = async (concept) => {
+            const confirmed = await showConfirm(`Delete this ${concept.type}?\n\n"${concept.content.slice(0, 100)}..."`, '🗑️ Delete Concept');
+            if (!confirmed) return;
+            try {
+                await ConceptManager.remove(firebaseUid, concept.id);
+                await showAlert('Concept deleted', '✅ Deleted');
+            } catch (e) { await showAlert(`Error: ${e.message}`, '❌ Error'); }
+        };
+
+        const transitionConcept = async (conceptId, newType) => {
+            if (!firebaseUid) return;
+            try {
+                const result = await ConceptManager.transition(firebaseUid, conceptId, newType);
+                setShowTransitionModal(null);
+                let msg = `Transitioned to ${newType}`;
+                if (result?.flaggedConcepts?.length > 0) {
+                    msg += `\n\n⚠️ ${result.flaggedConcepts.length} related concept(s) flagged for review (shared scope tags with transitioning CONSTRAINT)`;
+                }
+                await showAlert(msg, '✅ Transitioned');
+                console.log('[CC] Transitioned concept to', newType);
+            } catch (e) { await showAlert(`Error: ${e.message}`, '❌ Error'); }
+        };
+
+        const createIdea = async () => {
+            const name = await showPrompt('Idea name:', '', '💡 New Idea');
+            if (!name) return;
+            const description = await showPrompt('Description (optional):', '', '💡 New Idea');
+            const appId = mode === 'app-aggregate' ? selectedAppId : null;
+            const parentIdeas = appId ? appIdeas : [];
+            const parentIdeaId = parentIdeas.length > 0 ? parentIdeas[parentIdeas.length - 1].id : null;
+            try {
+                await IdeaManager.create(firebaseUid, {
+                    name, description: description || '',
+                    type: parentIdeaId ? 'addon' : 'base',
+                    appId, parentIdeaId
+                });
+                await showAlert('Idea created', '✅ Success');
+                console.log('[CC] Created idea:', name);
+            } catch (e) { await showAlert(`Error: ${e.message}`, '❌ Error'); }
+        };
+
+        const graduateIdea = async (ideaId) => {
+            if (!selectedAppId) {
+                await showAlert('Select an app first', '⚠️ No App');
+                return;
+            }
+            const confirmed = await showConfirm('Graduate this idea? It will be linked to the app and marked as graduated.', '🎓 Graduate Idea');
+            if (!confirmed) return;
+            try {
+                await IdeaManager.graduate(firebaseUid, ideaId, selectedAppId);
+                await showAlert('Idea graduated', '✅ Success');
+            } catch (e) { await showAlert(`Error: ${e.message}`, '❌ Error'); }
+        };
+
+        const archiveIdea = async (ideaId) => {
+            const confirmed = await showConfirm('Archive this idea?', '📦 Archive Idea');
+            if (!confirmed) return;
+            try {
+                await IdeaManager.archive(firebaseUid, ideaId);
+                await showAlert('Idea archived', '✅ Archived');
+            } catch (e) { await showAlert(`Error: ${e.message}`, '❌ Error'); }
+        };
+
+        // === Navigation helpers ===
+        const navigateToApp = (appId) => { setSelectedAppId(appId); setSelectedIdeaId(null); setMode('app-aggregate'); };
+        const navigateToIdea = (ideaId) => {
+            setSelectedIdeaId(ideaId);
+            const idea = globalIdeas.find(i => i.id === ideaId);
+            if (idea?.appId && !selectedAppId) setSelectedAppId(idea.appId);
+            setMode('idea-detail');
+        };
+        const goBack = () => {
+            if (mode === 'idea-detail') { setMode('app-aggregate'); setSelectedIdeaId(null); }
+            else if (mode === 'app-aggregate') { setMode('all'); setSelectedAppId(null); }
+        };
+
+        // === ConceptCard sub-component ===
+        const ConceptCard = ({ concept, showOrigin = true }) => {
+            const originIdea = globalIdeas.find(i => i.id === concept.ideaOrigin);
+            const style = TYPE_STYLES[concept.type] || {};
+            const validTransitions = ODRC_TRANSITIONS[concept.type] || [];
+
+            return (
+                <div className={`border rounded-lg p-3 mb-2 ${style.color}`}>
+                    <div className="flex items-center justify-between mb-1">
+                        <div className="flex items-center gap-2">
+                            <span className="text-sm">{style.icon}</span>
+                            <span className={`px-2 py-0.5 rounded text-xs font-medium ${style.color}`}>{concept.type}</span>
+                            <span className={`px-2 py-0.5 rounded text-xs ${STATUS_STYLES[concept.status] || ''}`}>{concept.status}</span>
+                        </div>
+                        <div className="flex items-center gap-1">
+                            {validTransitions.length > 0 && concept.status === 'active' && (
+                                <select
+                                    className="bg-slate-700 border border-slate-600 rounded px-1 py-0.5 text-xs"
+                                    value=""
+                                    onChange={(e) => {
+                                        if (e.target.value) setShowTransitionModal({ concept, targetType: e.target.value });
+                                    }}
+                                >
+                                    <option value="">→ Transition...</option>
+                                    {validTransitions.map(t => <option key={t} value={t}>{t}</option>)}
+                                </select>
+                            )}
+                            <button onClick={() => setShowEditModal({ concept, isNew: false })}
+                                className="px-2 py-0.5 rounded text-xs hover:bg-slate-600 text-slate-300">✏️</button>
+                            <button onClick={() => deleteConcept(concept)}
+                                className="px-2 py-0.5 rounded text-xs hover:bg-red-900/50 text-red-400">🗑️</button>
+                        </div>
+                    </div>
+                    <p className="text-sm text-slate-200 mb-1">{concept.content}</p>
+                    <div className="flex items-center gap-2 flex-wrap">
+                        {(concept.scopeTags || []).map(tag => (
+                            <span key={tag} className="px-1.5 py-0.5 bg-slate-700 rounded text-xs text-slate-400">{tag}</span>
+                        ))}
+                        {showOrigin && originIdea && (
+                            <button onClick={() => navigateToIdea(concept.ideaOrigin)}
+                                className="text-xs text-indigo-400 hover:text-indigo-300 ml-auto">
+                                from: {originIdea.name}
+                            </button>
+                        )}
+                    </div>
+                </div>
+            );
+        };
+
+        // === ConceptEditModal ===
+        const ConceptEditModal = ({ concept, isNew, defaultIdeaId, onClose }) => {
+            const [formData, setFormData] = React.useState({
+                type: concept?.type || 'OPEN',
+                content: concept?.content || '',
+                scopeTags: (concept?.scopeTags || []).join(', '),
+                ideaOrigin: concept?.ideaOrigin || defaultIdeaId || ''
+            });
+            const update = (field, value) => setFormData(prev => ({ ...prev, [field]: value }));
+
+            const handleSave = () => {
+                if (!formData.content.trim()) return;
+                if (!formData.ideaOrigin) { showAlert('Select an idea', '⚠️ Required'); return; }
+                const tags = formData.scopeTags.split(',').map(t => t.trim()).filter(Boolean);
+                if (isNew) {
+                    createConcept({ type: formData.type, content: formData.content.trim(), ideaOrigin: formData.ideaOrigin, scopeTags: tags });
+                } else {
+                    updateConcept(concept.id, { content: formData.content.trim(), scopeTags: tags });
+                }
+            };
+
+            return (
+                <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4" onClick={onClose}>
+                    <div className="bg-slate-800 rounded-xl border border-slate-700 w-full max-w-lg p-6" onClick={e => e.stopPropagation()}>
+                        <div className="flex items-center justify-between mb-4">
+                            <h2 className="text-lg font-bold">{isNew ? '➕ New Concept' : '✏️ Edit Concept'}</h2>
+                            <button onClick={onClose} className="text-slate-400 hover:text-white text-xl">✕</button>
+                        </div>
+                        <div className="space-y-3">
+                            {isNew && (
+                                <div>
+                                    <label className="text-xs text-slate-400 block mb-1">Type</label>
+                                    <div className="flex gap-2">
+                                        {ODRC_TYPES.map(t => (
+                                            <button key={t} onClick={() => update('type', t)}
+                                                className={`px-3 py-1.5 rounded text-xs font-medium ${formData.type === t ? TYPE_STYLES[t].color : 'bg-slate-700 text-slate-400'}`}>
+                                                {TYPE_STYLES[t].icon} {t}
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
+                            <div>
+                                <label className="text-xs text-slate-400 block mb-1">Content</label>
+                                <textarea value={formData.content} onChange={e => update('content', e.target.value)}
+                                    className="w-full bg-slate-700 border border-slate-600 rounded px-3 py-2 text-sm min-h-[80px]"
+                                    placeholder="Describe the concept..." />
+                            </div>
+                            <div>
+                                <label className="text-xs text-slate-400 block mb-1">Scope Tags (comma-separated)</label>
+                                <input value={formData.scopeTags} onChange={e => update('scopeTags', e.target.value)}
+                                    className="w-full bg-slate-700 border border-slate-600 rounded px-3 py-2 text-sm"
+                                    placeholder="architecture, data-model, ux" />
+                            </div>
+                            {isNew && (
+                                <div>
+                                    <label className="text-xs text-slate-400 block mb-1">Origin Idea</label>
+                                    <select value={formData.ideaOrigin} onChange={e => update('ideaOrigin', e.target.value)}
+                                        className="w-full bg-slate-700 border border-slate-600 rounded px-3 py-2 text-sm">
+                                        <option value="">Select idea...</option>
+                                        {globalIdeas.filter(i => i.status === 'active').map(i => (
+                                            <option key={i.id} value={i.id}>{i.name} ({apps[i.appId]?.name || 'unlinked'})</option>
+                                        ))}
+                                    </select>
+                                </div>
+                            )}
+                        </div>
+                        <div className="flex gap-2 mt-4 justify-end">
+                            <button onClick={onClose} className="px-4 py-2 rounded text-sm bg-slate-700 hover:bg-slate-600">Cancel</button>
+                            <button onClick={handleSave} className="px-4 py-2 rounded text-sm bg-indigo-600 hover:bg-indigo-500 font-medium">
+                                {isNew ? 'Create' : 'Save'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        // === TransitionConfirmationModal ===
+        const TransitionConfirmationModal = ({ concept, targetType, onClose }) => {
+            const sharedTagConcepts = targetType && concept.type === 'CONSTRAINT'
+                ? globalConcepts.filter(c => c.id !== concept.id && c.status === 'active'
+                    && ['DECISION', 'RULE'].includes(c.type)
+                    && (concept.scopeTags || []).some(tag => (c.scopeTags || []).includes(tag)))
+                : [];
+
+            return (
+                <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4" onClick={onClose}>
+                    <div className="bg-slate-800 rounded-xl border border-slate-700 w-full max-w-md p-6" onClick={e => e.stopPropagation()}>
+                        <h2 className="text-lg font-bold mb-3">Transition Concept</h2>
+                        <div className="flex items-center gap-3 mb-3">
+                            <span className={`px-2 py-1 rounded text-sm ${TYPE_STYLES[concept.type]?.color || ''}`}>{concept.type}</span>
+                            <span className="text-slate-400">→</span>
+                            <span className={`px-2 py-1 rounded text-sm ${TYPE_STYLES[targetType]?.color || ''}`}>{targetType}</span>
+                        </div>
+                        <p className="text-sm text-slate-300 mb-3">"{concept.content.slice(0, 120)}{concept.content.length > 120 ? '...' : ''}"</p>
+                        <p className="text-xs text-slate-400 mb-3">The original {concept.type} will be marked as "transitioned" and a new {targetType} will be created.</p>
+                        {sharedTagConcepts.length > 0 && (
+                            <div className="bg-amber-900/30 border border-amber-700/50 rounded p-3 mb-3">
+                                <p className="text-sm text-amber-300 font-medium">⚠️ {sharedTagConcepts.length} related concept(s) will be flagged for review:</p>
+                                <ul className="text-xs text-amber-200 mt-1 ml-4 list-disc">
+                                    {sharedTagConcepts.slice(0, 5).map(c => <li key={c.id}>{c.type}: {c.content.slice(0, 60)}...</li>)}
+                                    {sharedTagConcepts.length > 5 && <li>...and {sharedTagConcepts.length - 5} more</li>}
+                                </ul>
+                            </div>
+                        )}
+                        <div className="flex gap-2 justify-end">
+                            <button onClick={onClose} className="px-4 py-2 rounded text-sm bg-slate-700 hover:bg-slate-600">Cancel</button>
+                            <button onClick={() => transitionConcept(concept.id, targetType)}
+                                className="px-4 py-2 rounded text-sm bg-indigo-600 hover:bg-indigo-500 font-medium">Confirm Transition</button>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        // === GenerateCLAUDEModal (Step 4) ===
+        const GenerateCLAUDEModal = ({ appId, onClose }) => {
+            const app = configuredApps.find(a => a.id === appId) || apps[appId];
+            const latestIdea = appIdeas.find(i => i.status === 'active') || appIdeas[appIdeas.length - 1];
+            const [pushing, setPushing] = React.useState(false);
+
+            const markdown = React.useMemo(() => {
+                const rules = appActiveConcepts.filter(c => c.type === 'RULE');
+                const constraints = appActiveConcepts.filter(c => c.type === 'CONSTRAINT');
+                const decisions = appActiveConcepts.filter(c => c.type === 'DECISION' && c.ideaOrigin === (latestIdea?.id || ''));
+                const opens = appActiveConcepts.filter(c => c.type === 'OPEN');
+                const ideaName = (id) => globalIdeas.find(i => i.id === id)?.name || 'unknown';
+
+                return [
+                    `# CLAUDE.md — ${app?.name || 'Unknown App'}`,
+                    '',
+                    '## What This App Is',
+                    app?.description || 'No description set.',
+                    '',
+                    '## Current Build Objective',
+                    latestIdea ? `**${latestIdea.name}**\n${latestIdea.description || ''}` : 'No active idea.',
+                    '',
+                    '## RULEs — Do not violate these.',
+                    rules.length > 0 ? rules.map(r => `- ${r.content} *(from: ${ideaName(r.ideaOrigin)})*`).join('\n') : 'None.',
+                    '',
+                    '## CONSTRAINTs — External realities. Work within these.',
+                    constraints.length > 0 ? constraints.map(c => `- ${c.content} *(from: ${ideaName(c.ideaOrigin)})*`).join('\n') : 'None.',
+                    '',
+                    '## DECISIONs — Current direction for this phase.',
+                    decisions.length > 0 ? decisions.map(d => `- ${d.content}`).join('\n') : 'None.',
+                    '',
+                    '## OPENs — Unresolved. Flag if you encounter these during build.',
+                    opens.length > 0 ? opens.map(o => `- ${o.content} *(from: ${ideaName(o.ideaOrigin)})*`).join('\n') : 'None.',
+                    '',
+                    '## Completion File Requirement',
+                    '',
+                    'After completing any task, generate a completion file in `.cc/completions/`.',
+                    '- File location: .cc/completions/',
+                    '- File name: YYYY-MM-DDTHH-MM-SS_task-slug.md (UTC timestamp, kebab-case slug)',
+                    '- One file per task. Commit separately after the task\'s code commits.',
+                    ''
+                ].join('\n');
+            }, [appActiveConcepts, app, latestIdea, globalIdeas]);
+
+            const copyToClipboard = async () => {
+                try {
+                    await navigator.clipboard.writeText(markdown);
+                    await showAlert('CLAUDE.md copied to clipboard', '📋 Copied');
+                } catch (e) { await showAlert('Copy failed: ' + e.message, '❌ Error'); }
+            };
+
+            const pushToRepo = async () => {
+                if (!github || !app) return;
+                const repo = app.repos?.test || app.testRepo || app.repos?.prod || app.prodRepo;
+                if (!repo) { await showAlert('No repo configured for this app', '⚠️ No Repo'); return; }
+                setPushing(true);
+                try {
+                    const existing = await github.getFile(repo, 'CLAUDE.md');
+                    await github.createOrUpdateFile(repo, 'CLAUDE.md', markdown,
+                        'Update CLAUDE.md via Command Center', existing?.sha || null);
+                    await showAlert(`CLAUDE.md pushed to ${repo}`, '✅ Pushed');
+                    console.log('[CC] Pushed CLAUDE.md to', repo);
+                    onClose();
+                } catch (e) { await showAlert(`Push failed: ${e.message}`, '❌ Error'); }
+                setPushing(false);
+            };
+
+            return (
+                <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4" onClick={onClose}>
+                    <div className="bg-slate-800 rounded-xl border border-slate-700 w-full max-w-3xl max-h-[85vh] flex flex-col" onClick={e => e.stopPropagation()}>
+                        <div className="flex items-center justify-between p-4 border-b border-slate-700">
+                            <h2 className="text-lg font-bold">📄 Generate CLAUDE.md — {app?.name}</h2>
+                            <button onClick={onClose} className="text-slate-400 hover:text-white text-xl">✕</button>
+                        </div>
+                        <div className="flex-1 overflow-y-auto p-4">
+                            <pre className="text-sm text-slate-300 whitespace-pre-wrap font-mono bg-slate-900 rounded-lg p-4 border border-slate-700">{markdown}</pre>
+                        </div>
+                        <div className="flex gap-2 p-4 border-t border-slate-700 justify-end">
+                            <button onClick={copyToClipboard} className="px-4 py-2 rounded text-sm bg-slate-700 hover:bg-slate-600 font-medium">📋 Copy to Clipboard</button>
+                            <button onClick={pushToRepo} disabled={pushing}
+                                className="px-4 py-2 rounded text-sm bg-indigo-600 hover:bg-indigo-500 font-medium disabled:opacity-50">
+                                {pushing ? '⏳ Pushing...' : '🚀 Push to Repo'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        // === Auth guard ===
+        if (!firebaseUid) {
+            return (
+                <div className="text-center py-20">
+                    <div className="text-4xl mb-4">💡</div>
+                    <h2 className="text-xl font-bold mb-2">Sign in Required</h2>
+                    <p className="text-slate-400 mb-4">Sign in to manage ideas and concepts.</p>
+                    <button onClick={() => setView('settings')} className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded text-sm font-medium">Go to Settings</button>
+                </div>
+            );
+        }
+
+        const selectedApp = apps[selectedAppId];
+        const selectedIdea = globalIdeas.find(i => i.id === selectedIdeaId);
+
+        // === Render helper: grouped concept list ===
+        const renderConceptGroup = (type, concepts, showOrigin = true) => {
+            const items = concepts.filter(c => c.type === type);
+            if (items.length === 0) return null;
+            const style = TYPE_STYLES[type];
+            return (
+                <div key={type} className="mb-4">
+                    <h3 className="text-sm font-medium text-slate-300 mb-2 flex items-center gap-2">
+                        <span>{style.icon}</span> {type}s
+                        <span className="px-1.5 py-0.5 bg-slate-700 rounded text-xs text-slate-400">{items.length}</span>
+                    </h3>
+                    {items.map(c => <ConceptCard key={c.id} concept={c} showOrigin={showOrigin} />)}
+                </div>
+            );
+        };
+
+        return (
+            <div className="max-w-5xl mx-auto">
+                {/* Breadcrumbs */}
+                {mode !== 'all' && (
+                    <div className="flex items-center gap-2 mb-3 text-sm">
+                        <button onClick={() => { setMode('all'); setSelectedAppId(null); setSelectedIdeaId(null); }}
+                            className="text-indigo-400 hover:text-indigo-300">All Concepts</button>
+                        {mode === 'app-aggregate' && selectedApp && (
+                            <><span className="text-slate-600">/</span><span className="text-slate-300">{selectedApp.name}</span></>
+                        )}
+                        {mode === 'idea-detail' && (
+                            <>
+                                <span className="text-slate-600">/</span>
+                                <button onClick={goBack} className="text-indigo-400 hover:text-indigo-300">{selectedApp?.name || '...'}</button>
+                                <span className="text-slate-600">/</span>
+                                <span className="text-slate-300">{selectedIdea?.name || '...'}</span>
+                            </>
+                        )}
+                    </div>
+                )}
+
+                {/* === MODE 1: All Concepts === */}
+                {mode === 'all' && (
+                    <div>
+                        <div className="flex items-center justify-between mb-4">
+                            <h1 className="text-xl font-bold flex items-center gap-2">💡 Ideas & Concepts
+                                <span className="text-sm font-normal text-slate-400">{stats.active} active / {stats.total} total</span>
+                            </h1>
+                            <div className="flex gap-2">
+                                <button onClick={createIdea} className="px-3 py-1.5 rounded text-sm bg-slate-700 hover:bg-slate-600">+ New Idea</button>
+                                <button onClick={() => setShowEditModal({ concept: null, isNew: true })}
+                                    className="px-3 py-1.5 rounded text-sm bg-indigo-600 hover:bg-indigo-500 font-medium">+ New Concept</button>
+                            </div>
+                        </div>
+
+                        {/* Filter bar */}
+                        <div className="flex gap-2 mb-4 flex-wrap">
+                            <select value={typeFilter} onChange={e => setTypeFilter(e.target.value)}
+                                className="bg-slate-700 border border-slate-600 rounded px-2 py-1 text-sm">
+                                <option value="all">All Types</option>
+                                {ODRC_TYPES.map(t => <option key={t} value={t}>{TYPE_STYLES[t].icon} {t} ({stats.byType[t] || 0})</option>)}
+                            </select>
+                            <select value={statusFilter} onChange={e => setStatusFilter(e.target.value)}
+                                className="bg-slate-700 border border-slate-600 rounded px-2 py-1 text-sm">
+                                <option value="all">All Statuses</option>
+                                {CONCEPT_STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
+                            </select>
+                            <select value={appFilter} onChange={e => setAppFilter(e.target.value)}
+                                className="bg-slate-700 border border-slate-600 rounded px-2 py-1 text-sm">
+                                <option value="all">All Apps</option>
+                                {configuredApps.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+                            </select>
+                        </div>
+
+                        {/* Apps with concepts */}
+                        {configuredApps.length > 0 && (
+                            <div className="mb-6">
+                                <h2 className="text-sm font-medium text-slate-400 mb-2">Apps</h2>
+                                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                                    {configuredApps.map(app => {
+                                        const appIdeaIds = globalIdeas.filter(i => i.appId === app.id).map(i => i.id);
+                                        const count = globalConcepts.filter(c => appIdeaIds.includes(c.ideaOrigin) && c.status === 'active').length;
+                                        return (
+                                            <button key={app.id} onClick={() => navigateToApp(app.id)}
+                                                className="bg-slate-800 border border-slate-700 rounded-lg p-3 text-left hover:border-indigo-600 transition-colors">
+                                                <div className="font-medium text-sm">{app.name}</div>
+                                                <div className="text-xs text-slate-400 mt-1">
+                                                    {count > 0 ? `${count} active concept${count !== 1 ? 's' : ''}` : 'No concepts'}
+                                                    {' · '}{appIdeaIds.length > 0 ? `${globalIdeas.filter(i => i.appId === app.id).length} idea${globalIdeas.filter(i => i.appId === app.id).length !== 1 ? 's' : ''}` : 'No ideas'}
+                                                </div>
+                                            </button>
+                                        );
+                                    })}
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Concepts grouped by type */}
+                        {filteredConcepts.length === 0 ? (
+                            <div className="text-center py-12">
+                                <div className="text-4xl mb-4">{globalConcepts.length === 0 ? '💡' : '🔍'}</div>
+                                <h2 className="text-lg font-bold mb-2">{globalConcepts.length === 0 ? 'No concepts yet' : 'No concepts match filters'}</h2>
+                                <p className="text-slate-400">{globalConcepts.length === 0 ? 'Create your first concept to get started.' : 'Try adjusting your filters.'}</p>
+                            </div>
+                        ) : (
+                            <div>
+                                {ODRC_TYPES.map(type => renderConceptGroup(type, filteredConcepts))}
+                            </div>
+                        )}
+                    </div>
+                )}
+
+                {/* === MODE 2: App Aggregate === */}
+                {mode === 'app-aggregate' && selectedApp && (
+                    <div>
+                        <div className="flex items-center justify-between mb-4">
+                            <h1 className="text-xl font-bold flex items-center gap-2">
+                                {selectedApp.name}
+                                <span className="text-sm font-normal text-slate-400">{appActiveConcepts.length} active concepts</span>
+                            </h1>
+                            <div className="flex gap-2">
+                                <button onClick={createIdea} className="px-3 py-1.5 rounded text-sm bg-slate-700 hover:bg-slate-600">+ New Idea</button>
+                                <button onClick={() => setShowEditModal({ concept: null, isNew: true, defaultIdeaId: appIdeas.find(i => i.status === 'active')?.id })}
+                                    className="px-3 py-1.5 rounded text-sm bg-slate-700 hover:bg-slate-600">+ New Concept</button>
+                                {appActiveConcepts.length > 0 && (
+                                    <button onClick={() => setShowGenerateModal(true)}
+                                        className="px-3 py-1.5 rounded text-sm bg-green-700 hover:bg-green-600 font-medium">📄 Generate CLAUDE.md</button>
+                                )}
+                            </div>
+                        </div>
+
+                        {/* Idea chain */}
+                        {appIdeas.length > 0 && (
+                            <div className="mb-4">
+                                <h2 className="text-sm font-medium text-slate-400 mb-2">Idea History</h2>
+                                <div className="flex gap-2 flex-wrap">
+                                    {appIdeas.map((idea, idx) => (
+                                        <button key={idea.id} onClick={() => navigateToIdea(idea.id)}
+                                            className={`px-3 py-1.5 rounded-lg text-sm border transition-colors ${
+                                                idea.status === 'active' ? 'border-indigo-600 bg-indigo-900/30 text-indigo-300' :
+                                                idea.status === 'graduated' ? 'border-green-700 bg-green-900/20 text-green-400' :
+                                                'border-slate-700 bg-slate-800 text-slate-400'
+                                            }`}>
+                                            <span className="font-medium">{idx + 1}.</span> {idea.name}
+                                            <span className="text-xs ml-1 opacity-60">({idea.status})</span>
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Current truth: active concepts grouped by type */}
+                        {appActiveConcepts.length === 0 ? (
+                            <div className="text-center py-12">
+                                <div className="text-4xl mb-4">📋</div>
+                                <h2 className="text-lg font-bold mb-2">No active concepts</h2>
+                                <p className="text-slate-400">Create an idea and add concepts to build the app's specification.</p>
+                            </div>
+                        ) : (
+                            <div>
+                                <h2 className="text-sm font-medium text-slate-400 mb-2">Current Active State</h2>
+                                {ODRC_TYPES.map(type => renderConceptGroup(type, appActiveConcepts))}
+                            </div>
+                        )}
+                    </div>
+                )}
+
+                {/* === MODE 3: Idea Detail === */}
+                {mode === 'idea-detail' && selectedIdea && (
+                    <div>
+                        <div className="flex items-center justify-between mb-4">
+                            <div>
+                                <h1 className="text-xl font-bold flex items-center gap-2">
+                                    {selectedIdea.name}
+                                    <span className={`px-2 py-0.5 rounded text-xs ${
+                                        selectedIdea.status === 'active' ? 'bg-green-900/50 text-green-300' :
+                                        selectedIdea.status === 'graduated' ? 'bg-emerald-900/50 text-emerald-300' :
+                                        'bg-slate-700 text-slate-400'
+                                    }`}>{selectedIdea.status}</span>
+                                    <span className="px-2 py-0.5 bg-slate-700 rounded text-xs text-slate-400">{selectedIdea.type}</span>
+                                </h1>
+                                {selectedIdea.description && <p className="text-sm text-slate-400 mt-1">{selectedIdea.description}</p>}
+                            </div>
+                            <div className="flex gap-2">
+                                <button onClick={() => setShowEditModal({ concept: null, isNew: true, defaultIdeaId: selectedIdea.id })}
+                                    className="px-3 py-1.5 rounded text-sm bg-indigo-600 hover:bg-indigo-500 font-medium">+ Add Concept</button>
+                                {selectedIdea.status === 'active' && !selectedIdea.appId && (
+                                    <button onClick={() => graduateIdea(selectedIdea.id)}
+                                        className="px-3 py-1.5 rounded text-sm bg-green-700 hover:bg-green-600">🎓 Graduate</button>
+                                )}
+                                {selectedIdea.status === 'active' && (
+                                    <button onClick={() => archiveIdea(selectedIdea.id)}
+                                        className="px-3 py-1.5 rounded text-sm bg-slate-700 hover:bg-slate-600">📦 Archive</button>
+                                )}
+                            </div>
+                        </div>
+
+                        {ideaConcepts.length === 0 ? (
+                            <div className="text-center py-12">
+                                <div className="text-4xl mb-4">📝</div>
+                                <h2 className="text-lg font-bold mb-2">No concepts in this idea</h2>
+                                <p className="text-slate-400">Add concepts to define the scope of this idea.</p>
+                            </div>
+                        ) : (
+                            <div>
+                                {ODRC_TYPES.map(type => renderConceptGroup(type, ideaConcepts, false))}
+                            </div>
+                        )}
+                    </div>
+                )}
+
+                {/* Modals */}
+                {showEditModal && (
+                    <ConceptEditModal
+                        concept={showEditModal.concept}
+                        isNew={showEditModal.isNew}
+                        defaultIdeaId={showEditModal.defaultIdeaId}
+                        onClose={() => setShowEditModal(null)}
+                    />
+                )}
+                {showTransitionModal && (
+                    <TransitionConfirmationModal
+                        concept={showTransitionModal.concept}
+                        targetType={showTransitionModal.targetType}
+                        onClose={() => setShowTransitionModal(null)}
+                    />
+                )}
+                {showGenerateModal && selectedAppId && (
+                    <GenerateCLAUDEModal appId={selectedAppId} onClose={() => setShowGenerateModal(false)} />
+                )}
+            </div>
+        );
+    }
+
     // =========================================================================
     // RELEASE COORDINATION VIEW — Phase 4.4 + 4.5
     // Answers: "Is this version ready to ship?"
