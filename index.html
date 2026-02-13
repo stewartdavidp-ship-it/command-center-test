@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Command Center</title>
-    <meta name="version" content="8.65.1">
+    <meta name="version" content="8.65.2">
     <meta name="gs-app-id" content="command-center">
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -8876,7 +8876,7 @@ Frame all work using the ODRC model (OPENs, Decisions, Rules, Constraints). At t
                                     onClick={() => setModal({ type: 'deployAll' })}
                                     className="px-3 py-1 text-xs bg-green-700 hover:bg-green-600 rounded-full font-medium transition-colors"
                                 >
-                                    📦 Deploy Staged ({stagedFiles.filter(f => f.fileAction !== 'push-doc').length})
+                                    📦 Staged ({stagedFiles.length})
                                 </button>
                             )}
                             
@@ -10186,16 +10186,20 @@ Frame all work using the ODRC model (OPENs, Decisions, Rules, Constraints). At t
                             <span className="text-lg">📦</span>
                             <div>
                                 <div className="text-sm font-medium text-slate-200">
-                                    {stagedFiles.filter(f => f.fileAction !== 'push-doc').length} file{stagedFiles.filter(f => f.fileAction !== 'push-doc').length !== 1 ? 's' : ''} staged
+                                    {stagedFiles.length} file{stagedFiles.length !== 1 ? 's' : ''} received
                                     {(() => {
+                                        const deploys = stagedFiles.filter(f => f.fileAction === 'deploy').length;
                                         const docs = stagedFiles.filter(f => f.fileAction === 'push-doc').length;
-                                        return docs > 0 ? ` + ${docs} doc${docs !== 1 ? 's' : ''}` : '';
+                                        const parts = [];
+                                        if (deploys > 0) parts.push(`${deploys} to deploy`);
+                                        if (docs > 0) parts.push(`${docs} to push`);
+                                        return parts.length > 0 ? ` — ${parts.join(', ')}` : '';
                                     })()}
                                 </div>
-                                <div className="text-xs text-slate-500">
+                                <div className="text-xs text-slate-500 truncate" style={{ maxWidth: '400px' }}>
                                     {stagedFiles[0]?.multiApp
                                         ? `Multi-app package · ${[...new Set(stagedFiles.map(f => f.suggestedApp).filter(a => a !== '_shared'))].length} apps`
-                                        : stagedFiles[0]?.suggestedApp || 'Ready to deploy'
+                                        : stagedFiles.map(f => f.name).slice(0, 3).join(', ') + (stagedFiles.length > 3 ? `, +${stagedFiles.length - 3} more` : '')
                                     }
                                 </div>
                             </div>
