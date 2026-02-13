@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Command Center</title>
-    <meta name="version" content="8.63.2">
+    <meta name="version" content="8.63.3">
     <meta name="gs-app-id" content="command-center">
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -4593,6 +4593,26 @@ Frame all work using the ODRC model (OPENs, Decisions, Rules, Constraints). At t
         return `https://${owner}.github.io/${repoName}/`;
     }
     
+    // Helper to get satellite app URL (resolves to absolute GitHub Pages URL)
+    // Satellites always live in the production repo (command-center), not the test repo
+    // Works from any context: hosted on GitHub Pages, local file://, or in components without 'apps'
+    function getSatelliteUrl(apps, subPath) {
+        // 1. Try to resolve from apps config (most accurate — uses custom domains, etc.)
+        const ccApp = apps && apps['command-center'];
+        const prodRepo = ccApp?.prodRepo || ccApp?.repos?.prod || '';
+        if (prodRepo) {
+            return getGitHubPagesUrl(prodRepo, subPath);
+        }
+        // 2. If on GitHub Pages, always use the production repo for satellites
+        //    Satellites only exist in production (command-center), not test (command-center-test)
+        if (window.location.hostname.endsWith('.github.io')) {
+            const owner = window.location.hostname.split('.')[0];
+            return `${window.location.origin}/command-center/${subPath}/`;
+        }
+        // 3. Fallback: relative path (works when already at the right base)
+        return `${subPath}/`;
+    }
+
     // Helper to get effective subPath (falls back to defaults if stored value is empty)
     function getEffectiveSubPath(app, appId) {
         return app.subPath || '';
@@ -8648,7 +8668,7 @@ Frame all work using the ODRC model (OPENs, Decisions, Rules, Constraints). At t
                                             { id: 'analytics', icon: '📈', label: 'Analytics', desc: 'Portfolio, Users, Streams, Briefs', ready: true }
                                         ].map(sat => (
                                             <a key={sat.id}
-                                                href={sat.ready ? `${window.location.pathname.replace(/\/[^/]*$/, '')}/${sat.id}/` : '#'}
+                                                href={sat.ready ? getSatelliteUrl(apps, sat.id) : '#'}
                                                 target={sat.ready ? '_blank' : undefined}
                                                 rel={sat.ready ? 'noopener' : undefined}
                                                 onClick={sat.ready ? undefined : (e) => e.preventDefault()}
@@ -8878,7 +8898,7 @@ Frame all work using the ODRC model (OPENs, Decisions, Rules, Constraints). At t
                                         ⚠️ Repo Health Check — {repoHealthAlert.issues.length} repo{repoHealthAlert.issues.length > 1 ? 's' : ''} with unexpected files
                                     </div>
                                     <div className="flex gap-2">
-                                        <a href="infrastructure/" target="_blank" onClick={() => setRepoHealthAlert(null)}
+                                        <a href={getSatelliteUrl(apps, 'infrastructure')} target="_blank" onClick={() => setRepoHealthAlert(null)}
                                             className="px-3 py-1 text-xs bg-amber-700 hover:bg-amber-600 text-amber-100 rounded font-medium inline-flex items-center gap-1 no-underline">
                                             🔄 Open Repo Reset (Infrastructure)
                                         </a>
@@ -18422,7 +18442,7 @@ When complete, note: "Completes ${item.id}" in deploy notes.`;
                                                     
                                                     {/* Actions */}
                                                     <div className="col-span-1 flex gap-1 justify-end">
-                                                        <button onClick={() => window.open('analytics/', '_blank')}
+                                                        <button onClick={() => window.open(getSatelliteUrl(null, 'analytics'), '_blank')}
                                                             className="p-1.5 text-slate-500 hover:text-blue-400 hover:bg-slate-700 rounded" title="Product Brief (Analytics satellite)">
                                                             📄
                                                         </button>
@@ -21963,7 +21983,7 @@ The developer uses Claude for iterative development — each session should:
                             </div>
                         )}
                         {testResult.token && (
-                            <div className="mt-2 text-xs text-slate-500">Full connection tests (Rules, Functions, Auth) available in the <a href="infrastructure/" target="_blank" className="text-indigo-400 hover:text-indigo-300">Infrastructure satellite</a>.</div>
+                            <div className="mt-2 text-xs text-slate-500">Full connection tests (Rules, Functions, Auth) available in the <a href={getSatelliteUrl(null, 'infrastructure')} target="_blank" className="text-indigo-400 hover:text-indigo-300">Infrastructure satellite</a>.</div>
                         )}
                     </div>
                 )}
@@ -22406,7 +22426,7 @@ The developer uses Claude for iterative development — each session should:
                     <p className="text-sm text-slate-400 mb-4">
                         Firebase Auth Domains, GitHub Pages Domains, and Domain Registrar management have moved to the Infrastructure satellite app.
                     </p>
-                    <a href="infrastructure/" target="_blank" className="inline-flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-sm font-medium text-white no-underline transition-colors">
+                    <a href={getSatelliteUrl(null, 'infrastructure')} target="_blank" className="inline-flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-sm font-medium text-white no-underline transition-colors">
                         🔧 Open Infrastructure
                     </a>
                 </div>
