@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Command Center</title>
-    <meta name="version" content="8.64.3">
+    <meta name="version" content="8.65.0">
     <meta name="gs-app-id" content="command-center">
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -5803,6 +5803,37 @@ Frame all work using the ODRC model (OPENs, Decisions, Rules, Constraints). At t
         return `S-${y}-${m}-${d}-${n}`;
     }
 
+    // v8.65.0: Get top N Ideas sorted by recency, enriched with concept counts and session info
+    function getRecentIdeas(globalIdeas, globalConcepts, apps, maxCount = 5) {
+        const sorted = [...(globalIdeas || [])]
+            .filter(idea => idea.status === 'active')
+            .sort((a, b) => {
+                const dateA = a.lastSessionDate || new Date(a.updatedAt || a.createdAt || 0).getTime();
+                const dateB = b.lastSessionDate || new Date(b.updatedAt || b.createdAt || 0).getTime();
+                return (typeof dateB === 'number' ? dateB : 0) - (typeof dateA === 'number' ? dateA : 0);
+            })
+            .slice(0, maxCount);
+
+        return sorted.map(idea => {
+            const ideaConcepts = (globalConcepts || []).filter(c => c.ideaOrigin === idea.id);
+            const openCount = ideaConcepts.filter(c => c.type === 'OPEN' && c.status === 'active').length;
+            const totalConcepts = ideaConcepts.length;
+            const appName = idea.appId && apps?.[idea.appId] ? (apps[idea.appId].name || idea.appId) : 'unassigned';
+            const sessionLog = idea.sessionLog || [];
+            const lastSession = sessionLog.length > 0 ? sessionLog[sessionLog.length - 1] : null;
+
+            return {
+                ...idea,
+                openCount,
+                totalConcepts,
+                appName,
+                lastSession,
+                sessionCount: sessionLog.length,
+                phase: idea.phase || computeIdeaPhase(ideaConcepts.filter(c => c.status === 'active'))
+            };
+        });
+    }
+
     // =========================================================================
     // COMPLETION FILE SERVICE (v8.58.0 — Ingestion Pipeline Phase 1)
     // =========================================================================
@@ -6135,6 +6166,7 @@ Frame all work using the ODRC model (OPENs, Decisions, Rules, Constraints). At t
     
     function App() {
         const [view, setView] = React.useState('dashboard');
+        const [viewPayload, setViewPayload] = React.useState(null); // v8.65.0: deep-link payload for cross-view navigation
         // (multi-app zip state managed in DashboardView)
         const [pendingSessionReturn, setPendingSessionReturn] = React.useState(null); // SESSION_RETURN.json auto-review (Phase B)
         const [pendingOdrcImport, setPendingOdrcImport] = React.useState(null); // ODRC Updates from Chat session (Phase 3)
@@ -9085,6 +9117,7 @@ Frame all work using the ODRC model (OPENs, Decisions, Rules, Constraints). At t
                             setModal={setModal}
                             linkIssuesToVersion={linkIssuesToVersion}
                             setView={setView}
+                            setViewPayload={setViewPayload}
                             rollbackSnapshots={rollbackSnapshots}
                             onQuickRollback={quickRollback}
                             pendingSessionReturn={pendingSessionReturn}
@@ -9151,7 +9184,8 @@ Frame all work using the ODRC model (OPENs, Decisions, Rules, Constraints). At t
                     {view === 'ideas' && (
                         <IdeasView apps={apps} globalIdeas={globalIdeas} globalConcepts={globalConcepts}
                             firebaseUid={firebaseUid} showAlert={showAlert} showConfirm={showConfirm}
-                            showPrompt={showPrompt} config={config} setView={setView} github={github} />
+                            showPrompt={showPrompt} config={config} setView={setView} github={github}
+                            viewPayload={viewPayload} setViewPayload={setViewPayload} />
                     )}
 
                     {view === 'jobHistory' && (
@@ -10099,1938 +10133,155 @@ Frame all work using the ODRC model (OPENs, Decisions, Rules, Constraints). At t
     // DASHBOARD VIEW
     // =========================================================================
     
-    function DashboardView({ apps, config, stagedFiles, setStagedFiles, github, onFileDrop, onRemove, onDeploy, onBatchDeploy, onPromote, activeDeployments, removeActiveDeployment, refreshing, onUpdateStagedFile, deployingRepos, showConfirm, showAlert, showPrompt, globalIssues, globalWorkItems, globalStreams, globalSessions, globalActivity, deployments, firebaseUid, setModal, linkIssuesToVersion, setView, rollbackSnapshots, onQuickRollback, pendingSessionReturn, setPendingSessionReturn, pendingOdrcImport, setPendingOdrcImport, updateApp, globalConcepts, globalIdeas, addNotification }) {
-        const [selectedFileIds, setSelectedFileIds] = React.useState(new Set());
-        const [deployTarget, setDeployTarget] = React.useState({ appId: 'command-center', target: 'test' });
-        const [isDeploying, setIsDeploying] = React.useState(false);
-        const [deployCompleted, setDeployCompleted] = React.useState(false);
-        const [lastCompletedDeployId, setLastCompletedDeployId] = React.useState(null);
-        const [errorOverride, setErrorOverride] = React.useState(false);
-        
-        // Multi-app state
-        const [multiAppValidation, setMultiAppValidation] = React.useState(null);
-        const [multiAppDeployedVersions, setMultiAppDeployedVersions] = React.useState({});
-        const [multiAppCheckingVersions, setMultiAppCheckingVersions] = React.useState(false);
-        // Track if deploy button was clicked in this session (prevents history-based false positive)
-        const deployClickedThisSession = React.useRef(false);
-        // Track if the full batch action (deploy + doc push) is still running
-        const [batchActionRunning, setBatchActionRunning] = React.useState(false);
-        
-        // Multi-app: fetch deployed versions and run validation when multi-app files are staged
-        const isMultiApp = stagedFiles.length > 0 && stagedFiles[0]?.multiApp;
-        React.useEffect(() => {
-            if (!isMultiApp || !github) return;
-            
-            let cancelled = false;
-            const checkVersionsAndValidate = async () => {
-                setMultiAppCheckingVersions(true);
-                const versions = {};
-                
-                // Build resolved repos structure from staged files for validateMultiAppPackage
-                const resolvedRepos = {};
-                stagedFiles.forEach(f => {
-                    if (!f.repoKey) return;
-                    if (!resolvedRepos[f.repoKey]) resolvedRepos[f.repoKey] = { repo: f.repo, target: f.deployTarget, apps: {}, sharedFiles: [] };
-                    if (f.suggestedApp === '_shared') {
-                        resolvedRepos[f.repoKey].sharedFiles.push({ relativePath: f.name, repoPath: f.repoPath, entry: { async: () => f.content } });
-                    } else {
-                        if (!resolvedRepos[f.repoKey].apps[f.suggestedApp]) {
-                            resolvedRepos[f.repoKey].apps[f.suggestedApp] = { config: apps[f.suggestedApp], files: [], version: f.appVersion };
-                        }
-                        resolvedRepos[f.repoKey].apps[f.suggestedApp].files.push({ 
-                            relativePath: f.name, repoPath: f.repoPath,
-                            entry: { async: () => f.content }
-                        });
-                    }
-                });
-                
-                // Fetch deployed versions
-                for (const [repoKey, bucket] of Object.entries(resolvedRepos)) {
-                    for (const [appId, appData] of Object.entries(bucket.apps)) {
-                        const appConfig = apps[appId];
-                        if (!appConfig) continue;
-                        const repo = bucket.target === 'prod' ? (appConfig.prodRepo || appConfig.testRepo) : (appConfig.testRepo || appConfig.prodRepo);
-                        if (!repo) { versions[appId] = null; continue; }
-                        
-                        try {
-                            const targetPath = appConfig.subPath ? `${appConfig.subPath}/${appConfig.targetPath || 'index.html'}` : (appConfig.targetPath || 'index.html');
-                            const fileData = await github.getFileContent(repo, targetPath);
-                            versions[appId] = fileData?.textContent ? extractVersionFromHTML(fileData.textContent) : null;
-                        } catch (e) { versions[appId] = null; }
-                    }
-                }
-                
-                if (cancelled) return;
-                setMultiAppDeployedVersions(versions);
-                
-                // Run validation
-                const validationResult = await validateMultiAppPackage(resolvedRepos, apps, versions, github, stagedFiles[0]?.zipDirs);
-                if (!cancelled) {
-                    console.log(`[SmartDeploy] Validation: ${validationResult.overallSeverity || 'clean'} — ${validationResult.summary}`);
-                    if (validationResult.crossAppIssues?.length) {
-                        validationResult.crossAppIssues.forEach(i => console.log(`[SmartDeploy]   ${i.severity}: ${i.title}`));
-                    }
-                    setMultiAppValidation(validationResult);
-                    setMultiAppCheckingVersions(false);
-                }
-            };
-            
-            checkVersionsAndValidate();
-            return () => { cancelled = true; };
-        }, [isMultiApp, stagedFiles.length]);
-        
-        const [otherCollapsed, setOtherCollapsed] = React.useState(true); // v8.3.3: Collapse "Other" by default
-        
-        // v8.8.0: Project-based grouping with collapse state
-        const [collapsedProjects, setCollapsedProjects] = React.useState(() => {
-            // Default: all collapsed except first project with active deployments
-            const saved = localStorage.getItem('cc_collapsedProjects');
-            return saved ? JSON.parse(saved) : {};
-        });
-        
-        const toggleProject = (projId) => {
-            setCollapsedProjects(prev => {
-                const next = { ...prev, [projId]: !prev[projId] };
-                localStorage.setItem('cc_collapsedProjects', JSON.stringify(next));
-                return next;
-            });
-        };
-        
-        // v8.36.1: Intelligent deploy target selection
-        // Two-repo apps → TEST (safe default), prod-only → PROD, test-only → TEST
-        const getSmartTarget = (appId) => {
-            const app = apps[appId];
-            if (!app) return 'test';
-            const hasTest = !!(app.testRepo || app.repos?.test || (app.repoPatterns?.test?.length > 0));
-            const hasProd = !!(app.prodRepo || app.repos?.prod || (app.repoPatterns?.prod?.length > 0));
-            if (hasTest && hasProd) return 'test';   // Two-repo: safe default to TEST
-            if (hasProd && !hasTest) return 'prod';   // Prod-only: must be PROD
-            if (hasTest && !hasProd) return 'test';   // Test-only: must be TEST
-            return 'test'; // Fallback
-        };
-        
-        // Get available environments for an app (for dropdown filtering)
-        const getAvailableTargets = (appId) => {
-            const app = apps[appId];
-            if (!app) return ['test', 'prod'];
-            const hasTest = !!(app.testRepo || app.repos?.test || (app.repoPatterns?.test?.length > 0));
-            const hasProd = !!(app.prodRepo || app.repos?.prod || (app.repoPatterns?.prod?.length > 0));
-            const targets = [];
-            if (hasTest) targets.push('test');
-            if (hasProd) targets.push('prod');
-            return targets.length > 0 ? targets : ['test', 'prod']; // Fallback to both
-        };
-        
-        // Compatibility: get first deployment for legacy code
-        const activeDeployment = activeDeployments?.[0] || null;
-        
-        // v8.8.0: Group configured apps by project
+    function DashboardView({ apps, config, stagedFiles, setStagedFiles, github, onFileDrop, onRemove, onDeploy, onBatchDeploy, onPromote, activeDeployments, removeActiveDeployment, refreshing, onUpdateStagedFile, deployingRepos, showConfirm, showAlert, showPrompt, globalIssues, globalWorkItems, globalStreams, globalSessions, globalActivity, deployments, firebaseUid, setModal, linkIssuesToVersion, setView, setViewPayload, rollbackSnapshots, onQuickRollback, pendingSessionReturn, setPendingSessionReturn, pendingOdrcImport, setPendingOdrcImport, updateApp, globalConcepts, globalIdeas, addNotification }) {
+        // v8.65.0: Developer Landing Page — Work Board
+        const [continueIdea, setContinueIdea] = React.useState(null); // idea object for ExploreInChatModal
         const configuredApps = Object.values(apps).filter(a => a.testRepo || a.prodRepo);
-        const projects = getProjectsWithApps(apps, config?.projects);
-        
-        // Legacy grouping (still used by some references)
-        const publicApps = configuredApps.filter(a => a.appType === 'public' || !a.appType);
-        const internalApps = configuredApps.filter(a => a.appType === 'internal');
-        const otherApps = configuredApps.filter(a => a.appType === 'other');
-        
-        // Doc package validation — runs whenever staged files change
-        // Unified package validation — runs on selected files (selection-driven)
-        // Note: actual validation computed inside deploy controls where selectedFiles is available
-        
-        // Config ↔ code drift detection — only when deploying CC itself
-        const configDrift = React.useMemo(() => {
-            const ccFile = stagedFiles.find(f => 
-                f.fileAction === 'deploy' && 
-                (f.suggestedApp === 'command-center' || f.name === 'index.html') &&
-                f.content?.includes('CC_SEED_MANIFEST')
-            );
-            if (!ccFile) return null;
-            return detectConfigDrift(ccFile.content, config);
-        }, [stagedFiles, config]);
-        
-        // v8.8.0: Auto-expand project when deploy is active
-        React.useEffect(() => {
-            if (!activeDeployments?.length) return;
-            for (const dep of activeDeployments) {
-                if (dep.status === 'running' && dep.appId) {
-                    const app = apps[dep.appId];
-                    const projId = app?.project || 'other';
-                    if (collapsedProjects[projId]) {
-                        setCollapsedProjects(prev => {
-                            const next = { ...prev, [projId]: false };
-                            localStorage.setItem('cc_collapsedProjects', JSON.stringify(next));
-                            return next;
-                        });
-                    }
-                }
-            }
-        }, [activeDeployments]);
-        
-        // Auto-select detected app when staging new files
-        React.useEffect(() => {
-            if (stagedFiles.length === 0) return;
-            
-            // Find the most recently added file with high-confidence detection
-            const filesWithDetection = stagedFiles.filter(f => f.appDetection?.confidence === 'high' || f.appDetection?.confidence === 'definite');
-            if (filesWithDetection.length > 0) {
-                const detected = filesWithDetection[filesWithDetection.length - 1].suggestedApp;
-                if (detected && apps[detected]) {
-                    // v8.36.1: Intelligently select target based on app's repo configuration
-                    const targetEnv = getSmartTarget(detected);
-                    setDeployTarget(prev => ({ ...prev, appId: detected, target: targetEnv }));
-                    console.log(`🎯 Auto-selected app: ${detected}, target: ${targetEnv} (smart default)`);
-                    
-                    // If app has no repo assigned, try to auto-assign from available repos
-                    const app = apps[detected];
-                    if (!app.prodRepo && github) {
-                        console.log('🔍 No prod repo for', detected, '- attempting auto-assignment...');
-                        // Find repo matching this app's patterns
-                        github.listRepos().then(repos => {
-                            const patterns = app.repoPatterns?.prod || [];
-                            for (const pattern of patterns) {
-                                const found = repos.find(r => r.name.toLowerCase() === pattern.toLowerCase() && !r.name.toLowerCase().includes('test'));
-                                if (found) {
-                                    console.log('✅ Auto-assigned prod repo:', found.fullName);
-                                    updateApp(detected, { prodRepo: found.fullName });
-                                    break;
-                                }
-                            }
-                        }).catch(e => console.warn('Could not auto-assign repo:', e));
-                    }
-                }
-            }
-        }, [stagedFiles.length]); // Only when file count changes (new file added)
-        
-        // Keep deploying state while deployment is running, reset when complete
-        React.useEffect(() => {
-            if (activeDeployment) {
-                if (activeDeployment.status === 'running') {
-                    // Keep spinner going while deployment is in progress
-                    setIsDeploying(true);
-                } else if (activeDeployment.status === 'success' || activeDeployment.status === 'failed' || activeDeployment.status === 'error') {
-                    // Only stop spinner when deployment finishes (success or failure)
-                    setIsDeploying(false);
-                    // Only set deployCompleted if deploy was clicked this session
-                    if (activeDeployment.status === 'success' && 
-                        activeDeployment.id !== lastCompletedDeployId &&
-                        deployClickedThisSession.current) {
-                        setDeployCompleted(true);
-                        setLastCompletedDeployId(activeDeployment.id);
-                    }
-                }
-            }
-        }, [activeDeployment, activeDeployment?.status, activeDeployment?.id, lastCompletedDeployId]);
-        
-        // Reset deployCompleted when staging new files or files change
-        const stagedFileIds = stagedFiles.map(f => f.id).join(',');
-        React.useEffect(() => {
-            // Reset whenever staged files change (new files, different files, or cleared)
-            setDeployCompleted(false);
-        }, [stagedFileIds]);
-        
-        // Expanded app menus state
-        const [expandedApps, setExpandedApps] = React.useState({});
-        const [appInfo, setAppInfo] = React.useState({}); // { appId: { test: {...}, prod: {...} } }
-        const [loadingAppInfo, setLoadingAppInfo] = React.useState({});
-        
-        // Toggle app menu expansion
-        const toggleAppExpanded = async (appId) => {
-            const newExpanded = !expandedApps[appId];
-            setExpandedApps(prev => ({ ...prev, [appId]: newExpanded }));
-            
-            // Fetch app info if expanding and not already loaded
-            if (newExpanded && !appInfo[appId] && github) {
-                await fetchAppInfo(appId);
-            }
+        const recentIdeas = getRecentIdeas(globalIdeas, globalConcepts, apps, 5);
+        const activeIdeaCount = (globalIdeas || []).filter(i => i.status === 'active').length;
+        const activeAppCount = configuredApps.length;
+
+        // Stable reference for ExploreInChatModal — prevents remount on parent re-render
+        const exploreIdea = React.useMemo(() => {
+            if (!continueIdea) return null;
+            return (globalIdeas || []).find(i => i.id === continueIdea.id) || continueIdea;
+        }, [continueIdea, globalIdeas]);
+
+        // Navigation handlers
+        const handleNavigateIdea = (ideaId) => {
+            if (setViewPayload) setViewPayload({ ideaId });
+            setView('ideas');
         };
-        
-        // Fetch commit history and info for an app
-        const fetchAppInfo = async (appId) => {
-            const app = apps[appId];
-            if (!app || !github) return;
-            
-            setLoadingAppInfo(prev => ({ ...prev, [appId]: true }));
-            
-            const info = { test: null, prod: null };
-            
-            try {
-                if (app.testRepo) {
-                    const [owner, repo] = app.testRepo.split('/');
-                    const commits = await github.request(`/repos/${owner}/${repo}/commits?per_page=5`);
-                    const repoData = await github.request(`/repos/${owner}/${repo}`);
-                    info.test = {
-                        lastCommit: commits[0],
-                        recentCommits: commits,
-                        pushedAt: repoData.pushed_at
-                    };
-                }
-            } catch (e) {
-                console.error('Error fetching test repo info:', e);
-            }
-            
-            try {
-                if (app.prodRepo) {
-                    const [owner, repo] = app.prodRepo.split('/');
-                    const commits = await github.request(`/repos/${owner}/${repo}/commits?per_page=5`);
-                    const repoData = await github.request(`/repos/${owner}/${repo}`);
-                    info.prod = {
-                        lastCommit: commits[0],
-                        recentCommits: commits,
-                        pushedAt: repoData.pushed_at
-                    };
-                }
-            } catch (e) {
-                console.error('Error fetching prod repo info:', e);
-            }
-            
-            setAppInfo(prev => ({ ...prev, [appId]: info }));
-            setLoadingAppInfo(prev => ({ ...prev, [appId]: false }));
+        const handleNavigateApp = (appId) => {
+            if (appId) setView('projects');
         };
-        
-        // Force GitHub Pages rebuild by creating an empty commit
-        const forceRebuild = async (repo, target, silent = false) => {
-            if (!github || !repo) return;
-            
-            if (!silent) {
-                const confirmed = await showConfirm(
-                    `This creates an empty commit to trigger GitHub Pages deployment.\n\nThe site should update in 30-90 seconds.`,
-                    `Force Rebuild ${target.toUpperCase()}?`
-                );
-                if (!confirmed) return;
-            }
-            
-            try {
-                const [owner, repoName] = repo.split('/');
-                
-                // Get current commit
-                const ref = await github.request(`/repos/${owner}/${repoName}/git/ref/heads/main`);
-                const currentSha = ref.object.sha;
-                
-                // Get current commit details
-                const commit = await github.request(`/repos/${owner}/${repoName}/git/commits/${currentSha}`);
-                
-                // Create new commit with same tree (empty commit)
-                const newCommit = await github.request(`/repos/${owner}/${repoName}/git/commits`, {
-                    method: 'POST',
-                    body: JSON.stringify({
-                        message: `Force rebuild - ${new Date().toISOString()}`,
-                        tree: commit.tree.sha,
-                        parents: [currentSha]
-                    })
-                });
-                
-                // Update ref (force: true handles non-fast-forward cases)
-                await github.request(`/repos/${owner}/${repoName}/git/refs/heads/main`, {
-                    method: 'PATCH',
-                    body: JSON.stringify({ sha: newCommit.sha, force: true })
-                });
-                
-                if (!silent) {
-                    await showAlert(
-                        `GitHub Pages should update in 30-90 seconds.`,
-                        `✓ Rebuild Triggered for ${target.toUpperCase()}`
-                    );
-                }
-                
-                // Refresh app info
-                const appId = Object.entries(apps).find(([id, a]) => a.testRepo === repo || a.prodRepo === repo)?.[0];
-                if (appId) {
-                    setAppInfo(prev => ({ ...prev, [appId]: null }));
-                    fetchAppInfo(appId);
-                }
-                
-                return true;
-                
-            } catch (e) {
-                if (!silent) {
-                    await showAlert(`Error: ${e.message}`, 'Rebuild Failed');
-                }
-                return false;
-            }
+        const handleContinue = (idea) => {
+            setContinueIdea(idea);
         };
-        
-        // Format relative time
-        const formatRelativeTime = (dateStr) => {
-            if (!dateStr) return '—';
-            const date = new Date(dateStr);
-            const now = new Date();
-            const diffMs = now - date;
-            const diffMins = Math.floor(diffMs / 60000);
-            const diffHours = Math.floor(diffMs / 3600000);
-            const diffDays = Math.floor(diffMs / 86400000);
-            
-            if (diffMins < 1) return 'just now';
-            if (diffMins < 60) return `${diffMins}m ago`;
-            if (diffHours < 24) return `${diffHours}h ago`;
-            if (diffDays < 7) return `${diffDays}d ago`;
-            return date.toLocaleDateString();
-        };
-        
-        // Get actual selected files from staged (ensures fresh content)
-        const selectedFiles = stagedFiles.filter(f => selectedFileIds.has(f.id));
-        
-        // Clean up selections when staged files change
-        React.useEffect(() => {
-            setSelectedFileIds(prev => {
-                const validIds = new Set(stagedFiles.map(f => f.id));
-                const newSet = new Set([...prev].filter(id => validIds.has(id)));
-                return newSet.size !== prev.size ? newSet : prev;
-            });
-            setErrorOverride(false); // Reset error override when files change
-        }, [stagedFiles]);
-        
-        // Reset error override when selection changes
-        React.useEffect(() => {
-            setErrorOverride(false);
-        }, [selectedFileIds]);
-        
-        const toggleFileSelection = (file) => {
-            setSelectedFileIds(prev => {
-                const newSet = new Set(prev);
-                if (newSet.has(file.id)) {
-                    newSet.delete(file.id);
-                } else {
-                    newSet.add(file.id);
-                }
-                return newSet;
-            });
-        };
-        
-        const selectAll = () => setSelectedFileIds(new Set(stagedFiles.map(f => f.id)));
-        const selectNone = () => setSelectedFileIds(new Set());
-        
-        // === Phase 4.1: Product Health Metrics ===
-        const productMetrics = React.useMemo(() => {
-            const items = globalWorkItems || [];
-            const sessions = globalSessions || [];
-            const deps = deployments || [];
-            const now = Date.now();
-            const thirtyDaysAgo = now - (30 * 24 * 60 * 60 * 1000);
-            
-            // Features shipped this month (done items in last 30 days)
-            const shippedThisMonth = items.filter(wi => {
-                if (wi.status !== 'done') return false;
-                const completedAt = wi.completedAt || wi.updatedAt;
-                return completedAt && new Date(completedAt).getTime() > thirtyDaysAgo;
-            });
-            
-            // Pipeline health: items in each active stage
-            const pipeline = { idea: 0, ready: 0, 'in-progress': 0, review: 0 };
-            const staleItems = [];
-            items.forEach(wi => {
-                if (pipeline.hasOwnProperty(wi.status)) pipeline[wi.status]++;
-                if (WorkItemService.isStale && WorkItemService.isStale(wi)) staleItems.push(wi);
-            });
-            
-            // Session readiness: apps with ready items that have acceptance criteria
-            const readyByApp = {};
-            items.filter(wi => wi.status === 'ready').forEach(wi => {
-                if (!readyByApp[wi.appId]) readyByApp[wi.appId] = { count: 0, withCriteria: 0 };
-                readyByApp[wi.appId].count++;
-                if (wi.acceptanceCriteria?.length > 0) readyByApp[wi.appId].withCriteria++;
-            });
-            const readyApps = Object.entries(readyByApp)
-                .map(([appId, data]) => ({ appId, ...data, app: apps[appId] }))
-                .filter(a => a.app)
-                .sort((a, b) => b.withCriteria - a.withCriteria || b.count - a.count);
-            
-            // Cost per feature (sessions in last 30 days)
-            const recentSessions = sessions.filter(s => new Date(s.createdAt).getTime() > thirtyDaysAgo);
-            let totalCost = 0;
-            recentSessions.forEach(s => {
-                const tokens = s.packageTokens || 0;
-                const engineId = s.engineId || 'claude-sonnet-4.5';
-                const engine = EngineRegistryService.ENGINES[engineId];
-                if (engine && tokens > 0) {
-                    const inputCost = (tokens / 1000000) * engine.cost.input;
-                    const outputCost = ((tokens * 0.3) / 1000000) * engine.cost.output;
-                    totalCost += inputCost + outputCost;
-                }
-            });
-            const costPerFeature = shippedThisMonth.length > 0 ? totalCost / shippedThisMonth.length : 0;
-            
-            // Recent deploys count
-            const recentDeploys = deps.filter(d => new Date(d.timestamp || d.date).getTime() > thirtyDaysAgo);
-            
-            // In-progress sessions (sessions without deploy link)
-            const activeSessions = sessions.filter(s => s.status === 'prep' || s.status === 'active');
-            
-            return { 
-                shippedThisMonth, pipeline, staleItems, readyApps, 
-                recentSessions, totalCost, costPerFeature, 
-                recentDeploys, activeSessions,
-                totalActive: pipeline.idea + pipeline.ready + pipeline['in-progress'] + pipeline.review
-            };
-        }, [globalWorkItems, globalSessions, deployments, apps]);
-        
-        // Most-ready app for quick session action
-        const mostReadyApp = productMetrics.readyApps[0];
-        
-        // v8.54.0: Compute top-level validation for banner above drop zone
-        const topValidation = React.useMemo(() => {
-            if (stagedFiles.length === 0) return null;
-            const files = stagedFiles.filter(f => selectedFileIds.has(f.id));
-            if (files.length === 0) return null;
-            const valApp = apps[deployTarget.appId] || null;
-            const deployedV = deployTarget.target === 'prod' ? valApp?.currentProdVersion : valApp?.currentTestVersion;
-            return validatePackage(files, stagedFiles, valApp, deployedV);
-        }, [stagedFiles, selectedFileIds, deployTarget, apps]);
-        
-        // Detection info for banner
-        const topDetection = React.useMemo(() => {
-            if (stagedFiles.length === 0) return null;
-            const files = stagedFiles.filter(f => selectedFileIds.has(f.id) && f.fileAction !== 'push-doc');
-            const detected = files.filter(f => f.appDetection).map(f => ({ app: f.suggestedApp, confidence: f.appDetection.confidence }));
-            const primary = detected.find(d => d.confidence === 'high')?.app || detected[0]?.app;
-            if (!primary) return null;
-            const hasMismatch = primary !== deployTarget.appId;
-            return { primary, hasMismatch, appName: apps[primary]?.name, appIcon: apps[primary]?.icon };
-        }, [stagedFiles, selectedFileIds, deployTarget, apps]);
-        
+
+        // =====================================================================
+        // v8.65.0: Developer Landing Page return
+        // =====================================================================
         return (
             <div className="space-y-6">
-                {/* v8.54.0: Validation Banner — above everything when files are staged */}
-                {stagedFiles.length > 0 && (topValidation || topDetection) && (
-                    <div className={`rounded-lg border p-3 ${
-                        topValidation?.severity === 'error' ? 'bg-red-900/30 border-red-600' :
-                        topValidation?.severity === 'warning' || topDetection?.hasMismatch ? 'bg-amber-900/30 border-amber-600' :
-                        'bg-green-900/20 border-green-600/50'
-                    }`}>
-                        <div className="flex items-center justify-between gap-3">
-                            <div className="flex items-center gap-3 flex-1 min-w-0">
-                                {/* Detection status */}
-                                {topDetection && (
-                                    <span className="flex items-center gap-1.5 text-sm">
-                                        {topDetection.hasMismatch ? '⚠️' : '🎯'}
-                                        <AppIcon icon={topDetection.appIcon} size={18} />
-                                        <strong>{topDetection.appName}</strong>
-                                        {topDetection.hasMismatch && (
-                                            <span className="text-amber-400 text-xs">(deploying to {apps[deployTarget.appId]?.name})</span>
-                                        )}
-                                    </span>
-                                )}
-                                {/* Validation messages */}
-                                {topValidation && topValidation.severity !== 'info' && (
-                                    <span className={`text-sm ${
-                                        topValidation.severity === 'error' ? 'text-red-300' : 'text-amber-300'
-                                    }`}>
-                                        {topValidation.severity === 'error' ? '⛔' : '⚠️'} {topValidation.summary}
-                                    </span>
-                                )}
-                                {!topValidation && !topDetection?.hasMismatch && (
-                                    <span className="text-green-400 text-sm">✓ Ready to deploy</span>
-                                )}
-                            </div>
-                            {/* Quick actions */}
-                            <div className="flex items-center gap-2 flex-shrink-0">
-                                {topDetection?.hasMismatch && (
-                                    <button onClick={() => setDeployTarget(p => ({ ...p, appId: topDetection.primary }))}
-                                        className="px-2 py-1 bg-green-700 hover:bg-green-600 rounded text-xs whitespace-nowrap">
-                                        Use {topDetection.appName}
-                                    </button>
-                                )}
-                                {topValidation?.claudePrompt && (
-                                    <button onClick={() => { navigator.clipboard.writeText(topValidation.claudePrompt); showAlert('Fix prompt copied!', '📋'); }}
-                                        className="px-2 py-1 bg-slate-700 hover:bg-slate-600 rounded text-xs whitespace-nowrap flex items-center gap-1">
-                                        📋 Copy Fix
-                                    </button>
-                                )}
-                                <span className="text-xs text-slate-500">{stagedFiles.length} file{stagedFiles.length !== 1 ? 's' : ''} staged</span>
-                            </div>
-                        </div>
-                    </div>
-                )}
-                
-                {/* Slim drop zone */}
-                <div className="space-y-6">
-                    <div 
-                        onDrop={onFileDrop} 
-                        onDragOver={e => { e.preventDefault(); e.currentTarget.classList.add('border-indigo-500', 'bg-indigo-900/20', 'py-8'); e.currentTarget.classList.remove('py-3', 'border-slate-600'); }}
-                        onDragLeave={e => { e.currentTarget.classList.remove('border-indigo-500', 'bg-indigo-900/20', 'py-8'); e.currentTarget.classList.add('py-3', 'border-slate-600'); }}
-                        className="border-2 border-dashed border-slate-600 rounded-lg py-3 px-4 text-center transition-all duration-200 cursor-pointer"
-                    >
-                        <input type="file" multiple accept=".html,.js,.css,.json,.zip,.yml,.yaml,.md,.txt" onChange={onFileDrop} className="hidden" id="upload" />
-                        <label htmlFor="upload" className="cursor-pointer flex items-center justify-center gap-3 text-sm text-slate-400">
-                            <Icons.Upload />
-                            <span>Drop files to deploy, or drop a session package to review</span>
-                            <span className="text-xs text-slate-500">Multi-file • ZIP • Multi-app</span>
-                        </label>
-                    </div>
-
-                    {/* Phase 3: Pending ODRC Import banner */}
-                    {pendingOdrcImport && (
-                        <div className="bg-purple-900/30 border border-purple-600/50 rounded-xl p-4 flex items-center justify-between">
-                            <div className="flex items-center gap-3">
-                                <span className="text-2xl">💡</span>
-                                <div>
-                                    <div className="text-sm font-medium text-purple-200">ODRC Updates detected — {pendingOdrcImport.parsedUpdates.length} item{pendingOdrcImport.parsedUpdates.length !== 1 ? 's' : ''}</div>
-                                    <div className="text-xs text-purple-400/70 mt-0.5">
-                                        From: {pendingOdrcImport.fileName}
-                                        {pendingOdrcImport.metadata?.ideaId && ` · IdeaId: ${pendingOdrcImport.metadata.ideaId}`}
-                                        {pendingOdrcImport.metadata?.ideaSlug && ` · Idea: ${pendingOdrcImport.metadata.ideaSlug}`}
-                                        {pendingOdrcImport.metadata?.sessionNumber && ` · Session: ${pendingOdrcImport.metadata.sessionNumber}`}
-                                    </div>
-                                </div>
-                            </div>
-                            <div className="flex gap-2">
-                                <button onClick={() => setPendingOdrcImport(null)}
-                                    className="px-3 py-1.5 text-xs font-medium bg-slate-700 hover:bg-slate-600 text-white rounded-lg transition-colors">
-                                    Dismiss
-                                </button>
-                                <button onClick={() => setPendingOdrcImport({ ...pendingOdrcImport, showChecklist: true })}
-                                    className="px-3 py-1.5 text-xs font-medium bg-purple-600 hover:bg-purple-500 text-white rounded-lg transition-colors">
-                                    Review & Import
-                                </button>
-                            </div>
-                        </div>
-                    )}
-
-                    {/* Staged Files — Multi-App or Single-File view */}
-                    {stagedFiles.length > 0 && stagedFiles[0]?.multiApp && (() => {
-                        // Multi-app grouped view
-                        const appGroups = {};
-                        const sharedFiles = [];
-                        stagedFiles.forEach(f => {
-                            if (f.suggestedApp === '_shared') {
-                                sharedFiles.push(f);
-                            } else {
-                                if (!appGroups[f.suggestedApp]) appGroups[f.suggestedApp] = { files: [], version: null, repo: f.repo, target: f.deployTarget, repoKey: f.repoKey };
-                                appGroups[f.suggestedApp].files.push(f);
-                                if (f.appVersion) appGroups[f.suggestedApp].version = f.appVersion;
-                            }
-                        });
-                        const appIds = Object.keys(appGroups);
-                        const totalFiles = stagedFiles.length;
-                        const repoKeys = [...new Set(Object.values(appGroups).map(g => g.repoKey))];
-                        
-                        return (
-                            <div className="bg-slate-800 rounded-xl border border-indigo-500/60 p-6 shadow-lg shadow-indigo-900/20">
-                                {/* Header */}
-                                <div className="flex items-center justify-between mb-4">
-                                    <h2 className="text-lg font-semibold flex items-center gap-2">
-                                        📦 Package <span className="text-indigo-400">{appIds.length} app{appIds.length !== 1 ? 's' : ''}{(() => {
-                                            const td = stagedFiles.filter(f => f.fileAction === 'push-doc').length;
-                                            return td > 0 ? ` + ${td} doc${td !== 1 ? 's' : ''}` : '';
-                                        })()}</span>
-                                        <span className="text-sm text-slate-400 font-normal">{totalFiles} files across {repoKeys.length} repo{repoKeys.length !== 1 ? 's' : ''}</span>
-                                    </h2>
-                                    <button onClick={() => {
-                                        console.log('[SmartDeploy] Cleared staged files');
-                                        setStagedFiles([]);
-                                    }} className="px-2 py-1 bg-red-700 hover:bg-red-600 rounded text-xs flex items-center gap-1">
-                                        <Icons.Trash /> Clear
-                                    </button>
-                                </div>
-                                
-                                {/* Validation banner */}
-                                {multiAppValidation && multiAppValidation.overallSeverity && (
-                                    <div className={`rounded-lg border p-3 mb-4 ${
-                                        multiAppValidation.overallSeverity === 'error' ? 'bg-red-900/20 border-red-700' :
-                                        multiAppValidation.overallSeverity === 'warning' ? 'bg-amber-900/20 border-amber-700' :
-                                        'bg-blue-900/20 border-blue-700'
-                                    }`}>
-                                        <div className="flex items-center justify-between">
-                                            <div className="flex items-center gap-2 text-sm">
-                                                <span>{multiAppValidation.overallSeverity === 'error' ? '🛑' : multiAppValidation.overallSeverity === 'warning' ? '⚠️' : '✅'}</span>
-                                                <span className="font-medium">{multiAppValidation.summary}</span>
-                                            </div>
-                                            {multiAppValidation.overallSeverity !== 'info' && (
-                                                <button 
-                                                    onClick={() => {
-                                                        const issues = [];
-                                                        for (const [appId, val] of Object.entries(multiAppValidation.appValidations || {})) {
-                                                            if (val?.issues?.length > 0) {
-                                                                val.issues.forEach(i => issues.push(`${apps[appId]?.name || appId}: ${i.title} — ${i.fix || i.detail}`));
-                                                            }
-                                                        }
-                                                        (multiAppValidation.crossAppIssues || []).forEach(i => issues.push(`${i.title} — ${i.fix || i.detail}`));
-                                                        const prompt = `Fix these validation issues in the deploy package:\n\n${issues.join('\n')}`;
-                                                        navigator.clipboard.writeText(prompt);
-                                                        showAlert('Fix prompt copied to clipboard. Paste into Claude.', '📋 Copied');
-                                                    }}
-                                                    className="px-3 py-1.5 bg-orange-700 hover:bg-orange-600 rounded text-xs flex items-center gap-1 text-orange-100"
-                                                >
-                                                    📋 Copy Fix Prompt
-                                                </button>
-                                            )}
-                                        </div>
-                                        {multiAppValidation.crossAppIssues.length > 0 && (() => {
-                                            const errorWarnings = multiAppValidation.crossAppIssues.filter(i => i.severity === 'error' || i.severity === 'warning');
-                                            const infoIssues = multiAppValidation.crossAppIssues.filter(i => i.severity === 'info');
-                                            return (
-                                                <div className="mt-2 space-y-1 text-xs">
-                                                    {errorWarnings.map((issue, i) => (
-                                                        <div key={`ew${i}`} className={issue.severity === 'error' ? 'text-red-300' : 'text-amber-300'}>
-                                                            {issue.severity === 'error' ? '✗' : '⚠'} {issue.title}: {issue.detail}
-                                                        </div>
-                                                    ))}
-                                                    {infoIssues.length > 0 && (
-                                                        <details className="text-slate-400">
-                                                            <summary className="cursor-pointer select-none hover:text-slate-300">
-                                                                ℹ️ {infoIssues.length} info note{infoIssues.length !== 1 ? 's' : ''}: {infoIssues.map(i => i.title).join('; ')}
-                                                            </summary>
-                                                            <div className="mt-1 pl-5 space-y-0.5">
-                                                                {infoIssues.map((issue, i) => (
-                                                                    <div key={`info${i}`} className="text-slate-500">{issue.detail}</div>
-                                                                ))}
-                                                            </div>
-                                                        </details>
-                                                    )}
-                                                </div>
-                                            );
-                                        })()}
-                                    </div>
-                                )}
-                                
-                                {/* App rows */}
-                                <div className="space-y-1">
-                                    {appIds.map(appId => {
-                                        const group = appGroups[appId];
-                                        const appConfig = apps[appId];
-                                        const archiveVer = group.version;
-                                        const deployedVer = multiAppDeployedVersions?.[appId];
-                                        const appVal = multiAppValidation?.appValidations?.[appId];
-                                        const isNew = deployedVer === null || deployedVer === undefined;
-                                        const isCurrent = archiveVer && archiveVer === deployedVer;
-                                        const hasError = appVal?.severity === 'error';
-                                        const hasWarning = appVal?.severity === 'warning';
-                                        const deployFiles = group.files.filter(f => f.fileAction !== 'push-doc' && f.fileAction !== 'skip');
-                                        const docFiles = group.files.filter(f => f.fileAction === 'push-doc');
-                                        
-                                        return (
-                                            <div key={appId} className="px-4 py-3 rounded-lg bg-slate-700/30 border border-slate-600/50">
-                                                <div className="flex items-center gap-3">
-                                                    <AppIcon icon={appConfig?.icon} size={20} />
-                                                    <span className="font-medium min-w-[140px]">{appConfig?.name || appId}</span>
-                                                    
-                                                    {/* Version comparison */}
-                                                    <span className="font-mono text-sm text-slate-400 min-w-[70px] text-right">
-                                                        {multiAppCheckingVersions ? '...' : (deployedVer || '—')}
-                                                    </span>
-                                                    <span className="text-slate-500">→</span>
-                                                    <span className="font-mono text-sm text-indigo-300 min-w-[70px]">
-                                                        {archiveVer || '?'}
-                                                    </span>
-                                                    
-                                                    {/* Status */}
-                                                    <span className={`px-2 py-0.5 rounded text-xs ${
-                                                        hasError ? 'bg-red-900/50 text-red-300' :
-                                                        isNew ? 'bg-cyan-900/50 text-cyan-300' :
-                                                        isCurrent ? 'bg-green-900/50 text-green-300' :
-                                                        hasWarning ? 'bg-amber-900/50 text-amber-300' :
-                                                        'bg-amber-900/50 text-amber-300'
-                                                    }`}>
-                                                        {hasError ? '✗ Error' : isNew ? '🆕 New' : isCurrent ? '✓ Current' : '🔄 Update'}
-                                                    </span>
-                                                    
-                                                    <span className="text-xs text-slate-500 ml-auto">
-                                                        {deployFiles.length} file{deployFiles.length !== 1 ? 's' : ''}
-                                                        {docFiles.length > 0 && <span className="text-cyan-500"> + {docFiles.length} doc{docFiles.length !== 1 ? 's' : ''}</span>}
-                                                    </span>
-                                                    
-                                                    <span className={`px-1.5 py-0.5 rounded text-xs ${group.target === 'prod' ? 'bg-green-900/50 text-green-300' : 'bg-blue-900/50 text-blue-300'}`}>
-                                                        {group.target.toUpperCase()}
-                                                    </span>
-                                                </div>
-                                                
-                                                {/* Inline validation issues */}
-                                                {appVal?.issues?.length > 0 && (
-                                                    <div className="mt-2 ml-8 space-y-1">
-                                                        {appVal.issues.map((issue, i) => (
-                                                            <div key={i} className={`text-xs ${
-                                                                issue.severity === 'error' ? 'text-red-400' :
-                                                                issue.severity === 'warning' ? 'text-amber-400' : 'text-slate-500'
-                                                            }`}>
-                                                                {issue.severity === 'error' ? '✗' : '⚠'} {issue.title}{issue.fix ? ` — ${issue.fix}` : ''}
-                                                            </div>
-                                                        ))}
-                                                    </div>
-                                                )}
-                                                
-                                                {/* Doc files to push */}
-                                                {docFiles.length > 0 && (
-                                                    <div className="mt-2 ml-8 text-xs text-cyan-400 flex items-center gap-1 flex-wrap">
-                                                        📄 {docFiles.map(f => f.name).join(', ')}
-                                                    </div>
-                                                )}
-                                            </div>
-                                        );
-                                    })}
-                                    
-                                    {/* Shared files row */}
-                                    {sharedFiles.length > 0 && (
-                                        <div className="px-4 py-2 text-xs text-slate-500 flex items-center gap-2">
-                                            📎 {sharedFiles.length} shared: {sharedFiles.map(f => f.name).join(', ')}
-                                        </div>
-                                    )}
-                                </div>
-                                
-                                {/* Deploy bar */}
-                                <div className="mt-4 flex items-center gap-4">
-                                    <button
-                                        onClick={async () => {
-                                            const hasErrors = multiAppValidation?.overallSeverity === 'error';
-                                            if (hasErrors) {
-                                                await showAlert('Fix validation errors before deploying.\\n\\nCopy the fix prompt below and send to Claude.', '🛑 Blocked');
-                                                return;
-                                            }
-                                            
-                                            const appNames = appIds.map(id => `${apps[id]?.name || id} v${appGroups[id].version || '?'}`);
-                                            const confirmed = await showConfirm(
-                                                `Deploy ${appIds.length} app(s)?\\n\\n${appNames.map(n => '  • ' + n).join('\\n')}${sharedFiles.length > 0 ? `\\n  + ${sharedFiles.length} shared files` : ''}`,
-                                                '📦 Deploy All'
-                                            );
-                                            if (!confirmed) return;
-                                            
-                                            setBatchActionRunning(true);
-                                            try {
-                                            console.log('=== DEPLOY ALL START ===');
-                                            console.log(`[SmartDeploy] Deploying ${appIds.length} apps:`, appNames);
-                                            
-                                            // Group by repoKey and batch deploy
-                                            const repoBatches = {};
-                                            stagedFiles.forEach(f => {
-                                                if (!repoBatches[f.repoKey]) repoBatches[f.repoKey] = { files: [], repo: f.repo, target: f.deployTarget };
-                                                repoBatches[f.repoKey].files.push(f);
-                                            });
-                                            
-                                            for (const [rk, batch] of Object.entries(repoBatches)) {
-                                                console.log(`[SmartDeploy] Batch: ${rk} → ${batch.repo} (${batch.target}) | ${batch.files.length} files`);
-                                                const batchFiles = batch.files.map(f => ({
-                                                    id: f.id,
-                                                    name: f.name,
-                                                    targetPath: f.repoPath,
-                                                    fullRepoPath: true,
-                                                    content: f.content,
-                                                    encoding: f.encoding,
-                                                    size: f.size,
-                                                    appId: f.suggestedApp,
-                                                    version: f.appVersion || f.version
-                                                }));
-                                                
-                                                let primaryAppId = batch.files.find(f => f.suggestedApp && f.suggestedApp !== '_shared' && apps[f.suggestedApp])?.suggestedApp;
-                                                
-                                                // If no app files in this batch (e.g. only docs/shared), find an app that uses this repo
-                                                if (!primaryAppId) {
-                                                    primaryAppId = Object.keys(apps).find(id => {
-                                                        const a = apps[id];
-                                                        return (batch.target === 'test' ? a.testRepo : a.prodRepo) === batch.repo
-                                                            || (a.repos?.test === batch.repo || a.repos?.prod === batch.repo);
-                                                    });
-                                                }
-                                                
-                                                if (!primaryAppId) {
-                                                    console.warn(`[SmartDeploy] No valid app for batch ${rk}, skipping (${batch.files.length} files)`);
-                                                    continue;
-                                                }
-                                                
-                                                if (batchFiles.length > 1) {
-                                                    await onBatchDeploy(batchFiles, primaryAppId, batch.target);
-                                                } else if (batchFiles.length === 1) {
-                                                    await onDeploy(batchFiles[0], primaryAppId, batch.target);
-                                                }
-                                                
-                                                // Update versions for ALL apps in this batch, not just primary
-                                                const versionKey = batch.target === 'prod' ? 'currentProdVersion' : 'currentTestVersion';
-                                                const batchAppIds = [...new Set(batch.files.map(f => f.suggestedApp).filter(id => id && id !== '_shared'))];
-                                                for (const batchAppId of batchAppIds) {
-                                                    if (batchAppId === primaryAppId) continue; // primary already updated by handleBatchDeploy
-                                                    const appVersion = appGroups[batchAppId]?.version;
-                                                    if (appVersion) {
-                                                        updateApp(batchAppId, { [versionKey]: appVersion, updatedAt: Date.now() });
-                                                        console.log(`[SmartDeploy] Updated ${batchAppId} ${versionKey}: ${appVersion}`);
-                                                    }
-                                                }
-                                                
-                                                // Inter-batch delay: let GitHub settle before next batch commit
-                                                const batchKeys = Object.keys(repoBatches);
-                                                if (batchKeys.indexOf(rk) < batchKeys.length - 1) {
-                                                    console.log('[SmartDeploy] Waiting 1.5s before next batch...');
-                                                    await new Promise(r => setTimeout(r, 1500));
-                                                }
-                                            }
-                                            console.log('=== DEPLOY ALL COMPLETE ===');
-                                            
-                                            // Check deployed docs for concepts
-                                            const docFiles = stagedFiles
-                                                .filter(f => f.fileAction === 'push-doc' && f.content && typeof f.content === 'string')
-                                                .map(f => ({ name: f.name, content: f.content }));
-                                            if (docFiles.length > 0 && showPrompt) {
-                                                checkPushedDocsForConcepts(docFiles, globalStreams, showConfirm, showPrompt, {
-                                                    uid: firebaseUid,
-                                                    updateStream: WorkStreamService.update.bind(WorkStreamService)
-                                                }).catch(e => console.error('[Concepts] Error during concept check:', e));
-                                            }
-                                            } catch (e) {
-                                                console.error('[SmartDeploy] Deploy All failed:', e);
-                                                await showAlert(`Deploy failed: ${e.message}`, '❌ Error');
-                                            } finally {
-                                                setBatchActionRunning(false);
-                                            }
-                                        }}
-                                        disabled={multiAppValidation?.overallSeverity === 'error' || multiAppCheckingVersions || batchActionRunning}
-                                        className={`px-6 py-2 rounded-lg font-medium flex items-center gap-2 ${
-                                            batchActionRunning 
-                                                ? 'bg-emerald-700 cursor-wait' 
-                                                : 'bg-green-600 hover:bg-green-500 disabled:opacity-40 disabled:hover:bg-green-600'
-                                        }`}
-                                    >
-                                        {batchActionRunning ? (
-                                            <>
-                                                <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                                                Deploying...
-                                            </>
-                                        ) : (
-                                            <>🚀 Deploy All ({appIds.length} app{appIds.length !== 1 ? 's' : ''}{(() => {
-                                            const totalDocs = stagedFiles.filter(f => f.fileAction === 'push-doc').length;
-                                            return totalDocs > 0 ? ` + ${totalDocs} doc${totalDocs !== 1 ? 's' : ''}` : '';
-                                        })()})</>
-                                        )}
-                                    </button>
-                                    
-                                    {multiAppCheckingVersions && (
-                                        <span className="text-xs text-slate-400 flex items-center gap-2">
-                                            <div className="w-3 h-3 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin" />
-                                            Checking deployed versions...
-                                        </span>
-                                    )}
-                                </div>
-                            </div>
-                        );
-                    })()}
-                    
-                    {/* Staged Files — Single file view (non-multi-app) */}
-                    {stagedFiles.length > 0 && !stagedFiles[0]?.multiApp && (
-                        <div className="bg-slate-800 rounded-xl border border-indigo-500/60 p-6 shadow-lg shadow-indigo-900/20">
-                            <div className="flex items-center justify-between mb-4">
-                                <h2 className="text-lg font-semibold flex items-center gap-2">📦 Staged <span className="text-indigo-400">({stagedFiles.length})</span></h2>
-                                <div className="flex gap-2 text-xs">
-                                    <button onClick={selectAll} className="px-2 py-1 bg-slate-700 rounded hover:bg-slate-600">Select All</button>
-                                    <button onClick={selectNone} className="px-2 py-1 bg-slate-700 rounded hover:bg-slate-600">Select None</button>
-                                    <button onClick={() => {
-                                        setSelectedFileIds(new Set());
-                                        stagedFiles.forEach(f => onRemove(f.id));
-                                    }} className="px-2 py-1 bg-red-700 hover:bg-red-600 rounded flex items-center gap-1">
-                                        <Icons.Trash /> Clear All
-                                    </button>
-                                </div>
-                            </div>
-                            
-                            {/* Doc validation now handled by unified panel in deploy controls */}
-                            
-                            {/* Config ↔ Code Drift Banner (CC self-deploy only) */}
-                            {configDrift && configDrift.drifts.length > 0 && (() => {
-                                const hasCritical = configDrift.errorCount > 0 || configDrift.warnCount > 0;
-                                const borderColor = configDrift.errorCount > 0 
-                                    ? 'bg-red-900/20 border-red-700/50' 
-                                    : configDrift.warnCount > 0 
-                                        ? 'bg-orange-900/20 border-orange-700/50'
-                                        : 'bg-slate-800/50 border-slate-700/50';
-                                const textColor = configDrift.errorCount > 0 ? 'text-red-300' : configDrift.warnCount > 0 ? 'text-orange-300' : 'text-slate-400';
-                                
-                                return (
-                                    <details className={`mb-4 rounded-lg border ${borderColor}`} open={hasCritical || undefined}>
-                                        <summary className={`p-3 cursor-pointer select-none flex items-center justify-between ${textColor}`}>
-                                            <div className="text-sm font-medium flex items-center gap-2">
-                                                {configDrift.errorCount > 0 ? '🔴' : configDrift.warnCount > 0 ? '⚠️' : 'ℹ️'} Config ↔ Code Drift
-                                                <span className="text-xs opacity-70">
-                                                    ({configDrift.errorCount > 0 ? `${configDrift.errorCount} errors, ` : ''}{configDrift.warnCount > 0 ? `${configDrift.warnCount} mismatches, ` : ''}{configDrift.infoCount} info)
-                                                </span>
-                                            </div>
-                                            {hasCritical && configDrift.claudePrompt && (
-                                                <button
-                                                    onClick={(e) => {
-                                                        e.preventDefault();
-                                                        navigator.clipboard.writeText(configDrift.claudePrompt);
-                                                        showAlert('Copied to clipboard! Paste this into Claude to fix the seed values.', '📋 Drift Fix Prompt Copied');
-                                                    }}
-                                                    className={`px-2 py-1 text-xs rounded flex items-center gap-1 ${
-                                                        configDrift.errorCount > 0 ? 'bg-red-700 hover:bg-red-600 text-red-100' : 'bg-orange-700 hover:bg-orange-600 text-orange-100'
-                                                    }`}
-                                                >
-                                                    📋 Copy Fix Prompt
-                                                </button>
-                                            )}
-                                        </summary>
-                                        
-                                        <div className="px-3 pb-3">
-                                            <div className="text-xs space-y-0.5 max-h-32 overflow-y-auto">
-                                                {configDrift.drifts.filter(d => d.severity === 'error').map((d, i) => (
-                                                    <div key={`e${i}`} className="text-red-400">🔴 {d.detail}</div>
-                                                ))}
-                                                {configDrift.drifts.filter(d => d.severity === 'warn').map((d, i) => (
-                                                    <div key={`w${i}`} className="text-orange-400">⚠️ {d.detail}</div>
-                                                ))}
-                                                {configDrift.drifts.filter(d => d.severity === 'info').map((d, i) => (
-                                                    <div key={`i${i}`} className="text-blue-400">ℹ️ {d.detail}</div>
-                                                ))}
-                                            </div>
-                                            
-                                            {configDrift.claudePrompt && (
-                                                <details className="mt-2">
-                                                    <summary className="text-xs text-slate-500 cursor-pointer hover:text-slate-400">Show Claude fix prompt</summary>
-                                                    <div className="relative mt-1.5">
-                                                        <pre className="p-2 pr-16 bg-slate-900 rounded text-xs text-slate-300 whitespace-pre-wrap overflow-x-auto border border-slate-700">{configDrift.claudePrompt}</pre>
-                                                        <button onClick={() => { navigator.clipboard.writeText(configDrift.claudePrompt); showAlert('Copied!', '📋'); }}
-                                                            className="absolute top-2 right-2 px-2 py-1 text-xs bg-slate-700 hover:bg-slate-600 rounded text-slate-300">
-                                                            📋 Copy
-                                                        </button>
-                                                    </div>
-                                                </details>
-                                            )}
-                                        </div>
-                                    </details>
-                                );
-                            })()}
-                            
-                            {/* Batch Deploy Controls - At top for easy access */}
-                            {selectedFiles.length > 0 && (() => {
-                                // Only show deploy controls for deploy-type files
-                                const selectedDeployFiles = selectedFiles.filter(f => f.fileAction !== 'push-doc');
-                                const selectedDocFiles = selectedFiles.filter(f => f.fileAction === 'push-doc');
-                                
-                                if (selectedDeployFiles.length === 0 && selectedDocFiles.length === 0) return null;
-                                
-                                // Check if selected deploy files have detected apps
-                                const detectedApps = selectedDeployFiles
-                                    .filter(f => f.appDetection)
-                                    .map(f => ({ file: f.name, app: f.suggestedApp, confidence: f.appDetection.confidence }));
-                                
-                                const uniqueDetected = [...new Set(detectedApps.map(d => d.app))];
-                                const primaryDetected = detectedApps.find(d => d.confidence === 'high')?.app || uniqueDetected[0];
-                                
-                                // Check for mismatch
-                                const hasMismatch = primaryDetected && deployTarget.appId !== primaryDetected;
-                                const hasConflict = uniqueDetected.length > 1;
-                                
-                                // Unified validation — computed once, used by panel and deploy button
-                                const valAppConfig = apps[deployTarget.appId] || null;
-                                const valDeployedVersion = deployTarget.target === 'prod'
-                                    ? valAppConfig?.currentProdVersion
-                                    : valAppConfig?.currentTestVersion;
-                                const validation = validatePackage(selectedFiles, stagedFiles, valAppConfig, valDeployedVersion);
-                                
-                                return (
-                                <div className="mb-4 p-4 bg-slate-900 rounded-lg border border-indigo-500">
-                                    <div className="text-sm font-medium mb-3 flex items-center gap-2">
-                                        <Icons.Upload /> {selectedDeployFiles.length > 0 ? `Deploy ${selectedDeployFiles.length} file${selectedDeployFiles.length !== 1 ? 's' : ''}` : ''}{selectedDeployFiles.length > 0 && selectedDocFiles.length > 0 ? ' + ' : ''}{selectedDocFiles.length > 0 ? `Push ${selectedDocFiles.length} doc${selectedDocFiles.length !== 1 ? 's' : ''}` : ''}
-                                    </div>
-                                    
-                                    {/* Auto-detected app suggestion */}
-                                    {primaryDetected && !hasConflict && (
-                                        <div className={`mb-3 p-2 rounded text-sm flex items-center justify-between ${
-                                            hasMismatch ? 'bg-amber-900/50 border border-amber-600' : 'bg-green-900/50 border border-green-600'
-                                        }`}>
-                                            <span className="flex items-center gap-2">
-                                                {hasMismatch ? '⚠️' : '🎯'} Detected: <strong className="flex items-center gap-1"><AppIcon icon={apps[primaryDetected]?.icon} size={18} /> {apps[primaryDetected]?.name}</strong>
-                                            </span>
-                                            {hasMismatch && (
-                                                <button 
-                                                    onClick={() => setDeployTarget(p => ({ ...p, appId: primaryDetected }))}
-                                                    className="px-2 py-1 bg-green-700 hover:bg-green-600 rounded text-xs">
-                                                    Use Detected
-                                                </button>
-                                            )}
-                                        </div>
-                                    )}
-                                    
-                                    {/* Conflict warning */}
-                                    {hasConflict && (
-                                        <div className="mb-3 p-2 bg-red-900/50 border border-red-600 rounded text-sm">
-                                            ⚠️ Multiple apps detected in selection: {uniqueDetected.map(a => apps[a]?.name).join(', ')}
-                                        </div>
-                                    )}
-                                    
-                                    <div className="grid grid-cols-2 gap-3 mb-3">
-                                        <select value={deployTarget.appId} onChange={e => {
-                                            const newAppId = e.target.value;
-                                            // v8.36.1: Smart default based on app's repo configuration
-                                            setDeployTarget({ appId: newAppId, target: getSmartTarget(newAppId) });
-                                        }}
-                                            className={`p-2 border rounded text-sm ${
-                                                hasMismatch 
-                                                    ? 'bg-amber-900 border-amber-500' 
-                                                    : 'bg-slate-700 border-slate-600'
-                                            }`}>
-                                            {Object.values(apps).map(a => <option key={a.id} value={a.id}>{getAppEmoji(a.icon)} {a.name}</option>)}
-                                        </select>
-                                        <select value={deployTarget.target} onChange={e => setDeployTarget(p => ({ ...p, target: e.target.value }))}
-                                            className="p-2 bg-slate-700 border border-slate-600 rounded text-sm">
-                                            {getAvailableTargets(deployTarget.appId).map(t => (
-                                                <option key={t} value={t}>{t === 'test' ? '🧪 TEST' : '🚀 PROD'}</option>
-                                            ))}
-                                        </select>
-                                    </div>
-                                    
-                                    {/* Mismatch warning on deploy button */}
-                                    {hasMismatch && (
-                                        <div className="mb-2 text-xs text-amber-400">
-                                            ⚠️ You're deploying to {apps[deployTarget.appId]?.name} but file appears to be {apps[primaryDetected]?.name}
-                                        </div>
-                                    )}
-                                    
-                                    {/* === UNIFIED VALIDATION PANEL === */}
-                                    {(() => {
-                                        if (!validation) return null;
-                                        
-                                        const panelBg = validation.severity === 'error'
-                                            ? 'bg-red-900/20 border-red-700/50'
-                                            : validation.severity === 'warning'
-                                                ? 'bg-amber-900/20 border-amber-700/50'
-                                                : 'bg-slate-800/50 border-slate-600/50';
-                                        const panelText = validation.severity === 'error'
-                                            ? 'text-red-300'
-                                            : validation.severity === 'warning'
-                                                ? 'text-amber-300'
-                                                : 'text-slate-400';
-                                        const isInfoOnly = validation.severity === 'info';
-                                        
-                                        const errorIssues = validation.issues.filter(i => i.severity === 'error');
-                                        const warnIssues = validation.issues.filter(i => i.severity === 'warning');
-                                        const infoIssues = validation.issues.filter(i => i.severity === 'info');
-                                        
-                                        
-                                        return isInfoOnly ? (
-                                            // Info: single collapsed line
-                                            <details className={`mb-3 rounded-lg border ${panelBg}`}>
-                                                <summary className={`p-2 cursor-pointer select-none text-xs ${panelText} flex items-center gap-1.5`}>
-                                                    ℹ️ {infoIssues.map(i => i.detail).join('; ')}
-                                                </summary>
-                                                {validation.claudePrompt && (
-                                                    <div className="px-2 pb-2">
-                                                        <pre className="p-2 bg-slate-900 rounded text-xs text-slate-400 whitespace-pre-wrap border border-slate-700">{validation.claudePrompt}</pre>
-                                                    </div>
-                                                )}
-                                            </details>
-                                        ) : (
-                                            // Warning/Error: expanded panel
-                                            <div className={`mb-3 p-3 rounded-lg border ${panelBg}`}>
-                                                <div className="flex items-center justify-between mb-2">
-                                                    <div className={`text-xs font-medium ${panelText} flex items-center gap-1.5`}>
-                                                        {validation.severity === 'error' ? '⛔' : '⚠️'} {validation.summary}
-                                                    </div>
-                                                    {validation.claudePrompt && (
-                                                        <button
-                                                            onClick={() => {
-                                                                navigator.clipboard.writeText(validation.claudePrompt);
-                                                                showAlert('Copied to clipboard! Paste into Claude to fix.', '📋 Fix Prompt Copied');
-                                                            }}
-                                                            className={`px-2 py-1 text-xs rounded flex items-center gap-1 ${
-                                                                validation.severity === 'error' 
-                                                                    ? 'bg-red-700 hover:bg-red-600 text-red-100' 
-                                                                    : 'bg-amber-700 hover:bg-amber-600 text-amber-100'
-                                                            }`}
-                                                        >
-                                                            📋 Copy Fix Prompt
-                                                        </button>
-                                                    )}
-                                                </div>
-                                                
-                                                <div className="text-xs space-y-1.5">
-                                                    {errorIssues.map((issue, i) => (
-                                                        <div key={`e${i}`} className="text-red-400 flex items-start gap-1.5">
-                                                            <span className="flex-shrink-0">🔴</span>
-                                                            <span>{issue.detail}</span>
-                                                        </div>
-                                                    ))}
-                                                    {warnIssues.map((issue, i) => (
-                                                        <div key={`w${i}`}>
-                                                            <div className="text-amber-400 flex items-start gap-1.5">
-                                                                <span className="flex-shrink-0">🟡</span>
-                                                                <span>{issue.detail}</span>
-                                                            </div>
-                                                            {/* Version bump action (code-only flow) */}
-                                                            {issue.action?.type === 'bump-version' && (
-                                                                <div className="ml-5 mt-1.5 flex items-center gap-2 flex-wrap">
-                                                                    <button
-                                                                        onClick={() => {
-                                                                            const newV = issue.action.suggested;
-                                                                            // Bump index.html
-                                                                            const idxFile = stagedFiles.find(f => f.name === 'index.html' && f.fileAction === 'deploy');
-                                                                            if (idxFile) {
-                                                                                const fixedHtml = fixVersionsInContent(idxFile.content, newV);
-                                                                                const newValidation = validateVersions(fixedHtml, idxFile.name);
-                                                                                onUpdateStagedFile(idxFile.id, { content: fixedHtml, version: newV, versionValidation: newValidation });
-                                                                            }
-                                                                            // Bump sw.js
-                                                                            const swFile = stagedFiles.find(f => f.name === 'sw.js' && f.fileAction === 'deploy');
-                                                                            if (swFile && swFile.content) {
-                                                                                const fixedSw = swFile.content.replace(
-                                                                                    /(CACHE_VERSION\s*=\s*['"])v?[^'"]*(['"])/g,
-                                                                                    `$1v${newV}$2`
-                                                                                );
-                                                                                onUpdateStagedFile(swFile.id, { content: fixedSw, version: newV });
-                                                                            }
-                                                                            showAlert(`Bumped to v${newV}`, '✅ Version Updated');
-                                                                        }}
-                                                                        className="px-2 py-1 bg-green-700 hover:bg-green-600 text-xs rounded text-green-100 flex items-center gap-1"
-                                                                    >
-                                                                        🔧 Bump to v{issue.action.suggested}
-                                                                    </button>
-                                                                    <span className="text-slate-500 text-xs">or</span>
-                                                                    <input
-                                                                        type="text"
-                                                                        placeholder="x.x.x"
-                                                                        className="w-20 px-2 py-1 bg-slate-900 border border-slate-600 rounded text-xs text-white"
-                                                                        onKeyDown={(e) => {
-                                                                            if (e.key === 'Enter' && e.target.value.match(/^\d+\.\d+\.\d+$/)) {
-                                                                                const newV = e.target.value;
-                                                                                const idxFile = stagedFiles.find(f => f.name === 'index.html' && f.fileAction === 'deploy');
-                                                                                if (idxFile) {
-                                                                                    const fixedHtml = fixVersionsInContent(idxFile.content, newV);
-                                                                                    const newValidation = validateVersions(fixedHtml, idxFile.name);
-                                                                                    onUpdateStagedFile(idxFile.id, { content: fixedHtml, version: newV, versionValidation: newValidation });
-                                                                                }
-                                                                                const swFile = stagedFiles.find(f => f.name === 'sw.js' && f.fileAction === 'deploy');
-                                                                                if (swFile && swFile.content) {
-                                                                                    const fixedSw = swFile.content.replace(
-                                                                                        /(CACHE_VERSION\s*=\s*['"])v?[^'"]*(['"])/g,
-                                                                                        `$1v${newV}$2`
-                                                                                    );
-                                                                                    onUpdateStagedFile(swFile.id, { content: fixedSw, version: newV });
-                                                                                }
-                                                                                showAlert(`Bumped to v${newV}`, '✅ Version Updated');
-                                                                                e.target.value = '';
-                                                                            }
-                                                                        }}
-                                                                    />
-                                                                    <button
-                                                                        onClick={() => {
-                                                                            // Mark as dismissed — just deploy as-is
-                                                                            // The deploy button already works, this is just UX clarity
-                                                                        }}
-                                                                        className="px-2 py-1 text-slate-500 hover:text-slate-300 text-xs"
-                                                                    >
-                                                                        Deploy as-is
-                                                                    </button>
-                                                                </div>
-                                                            )}
-                                                        </div>
-                                                    ))}
-                                                    {infoIssues.map((issue, i) => (
-                                                        <div key={`i${i}`} className="text-slate-500 flex items-start gap-1.5">
-                                                            <span className="flex-shrink-0">ℹ️</span>
-                                                            <span>{issue.detail}</span>
-                                                        </div>
-                                                    ))}
-                                                </div>
-                                                
-                                                {/* Claude prompt expandable */}
-                                                {validation.claudePrompt && (
-                                                    <details className="mt-2">
-                                                        <summary className={`text-xs cursor-pointer hover:opacity-80 ${
-                                                            validation.severity === 'error' ? 'text-red-500' : 'text-amber-500'
-                                                        }`}>Show Claude fix prompt</summary>
-                                                        <div className="relative mt-1.5">
-                                                            <pre className="p-2 pr-16 bg-slate-900 rounded text-xs text-slate-300 whitespace-pre-wrap overflow-x-auto border border-slate-700">{validation.claudePrompt}</pre>
-                                                            <button onClick={() => { navigator.clipboard.writeText(validation.claudePrompt); showAlert('Copied!', '📋'); }}
-                                                                className="absolute top-2 right-2 px-2 py-1 text-xs bg-slate-700 hover:bg-slate-600 rounded text-slate-300">
-                                                                📋 Copy
-                                                            </button>
-                                                        </div>
-                                                    </details>
-                                                )}
-                                                
-                                                {/* Error override checkbox */}
-                                                {validation.severity === 'error' && (
-                                                    <label className="mt-2 flex items-start gap-2 text-xs text-red-400 cursor-pointer select-none">
-                                                        <input type="checkbox" className="mt-0.5"
-                                                            checked={errorOverride}
-                                                            onChange={e => setErrorOverride(e.target.checked)}
-                                                        />
-                                                        <span>I understand these issues may break the app for users — deploy anyway</span>
-                                                    </label>
-                                                )}
-                                            </div>
-                                        );
-                                    })()}
-                                    
-                                    {/* Deploy Button */}
-                                    {(() => {
-                                        const hasValidationError = validation?.severity === 'error' && !errorOverride;
-                                        
-                                        const buttonDisabled = !github || isDeploying || batchActionRunning || hasValidationError;
-                                        const buttonStyle = (() => {
-                                            if (isDeploying || batchActionRunning) return 'bg-emerald-700 cursor-wait';
-                                            if (deployCompleted) return 'bg-orange-500 hover:bg-orange-600';
-                                            if (hasValidationError) return 'bg-slate-600 cursor-not-allowed opacity-50';
-                                            if (validation?.severity === 'error' && errorOverride) return 'bg-red-600 hover:bg-red-700';
-                                            if (validation?.severity === 'warning') return 'bg-amber-600 hover:bg-amber-700';
-                                            if (hasMismatch) return 'bg-amber-600 hover:bg-amber-700';
-                                            return deployTarget.target === 'prod' ? 'bg-green-600 hover:bg-green-700' : 'bg-blue-600 hover:bg-blue-700';
-                                        })();
-                                        
-                                        const buttonPrefix = (() => {
-                                            if (isDeploying || deployCompleted || batchActionRunning) return '';
-                                            if (hasValidationError) return '🚫 ';
-                                            if (validation?.severity === 'error' && errorOverride) return '⚠️ ';
-                                            if (validation?.severity === 'warning') return '⚠️ ';
-                                            if (hasMismatch) return '⚠️ ';
-                                            return '';
-                                        })();
-                                        
-                                        return (
-                                        <button onClick={async () => {
-                                            setDeployCompleted(false);
-                                            
-                                            const executeBatchAction = async () => {
-                                                setIsDeploying(true);
-                                                setBatchActionRunning(true);
-                                                deployClickedThisSession.current = true;
-                                                
-                                                try {
-                                                if (selectedDeployFiles.length > 0) {
-                                                    console.log('Deploying files:', selectedDeployFiles.map(f => ({ name: f.name, id: f.id, size: f.content?.length })));
-                                                    await onBatchDeploy(selectedDeployFiles, deployTarget.appId, deployTarget.target);
-                                                }
-                                                
-                                                if (selectedDocFiles.length > 0 && github) {
-                                                    const app = apps[deployTarget.appId];
-                                                    const repo = deployTarget.target === 'prod'
-                                                        ? (app?.repos?.prod || app?.prodRepo || app?.repos?.test || app?.testRepo)
-                                                        : (app?.repos?.test || app?.testRepo || app?.repos?.prod || app?.prodRepo);
-                                                    if (repo) {
-                                                        console.log('Pushing docs to:', repo);
-                                                        const pushedDocIds = [];
-                                                        const actuallyPushedDocs = [];
-                                                        for (const doc of selectedDocFiles) {
-                                                            try {
-                                                                const existing = await github.getFile(repo, doc.targetPath);
-                                                                const sha = existing?.sha || null;
-                                                                
-                                                                // Skip if content is identical to what's in the repo
-                                                                if (existing && isDocUnchanged(existing, doc.content)) {
-                                                                    console.log(`⏭️ ${doc.name} unchanged, skipping push`);
-                                                                    pushedDocIds.push(doc.id);
-                                                                    continue;
-                                                                }
-                                                                
-                                                                await github.createOrUpdateFile(
-                                                                    repo,
-                                                                    doc.targetPath,
-                                                                    doc.content,
-                                                                    `${sha ? 'Update' : 'Add'} ${doc.name} via Command Center`,
-                                                                    sha
-                                                                );
-                                                                console.log(`✅ Pushed ${doc.name} → ${repo}/${doc.targetPath}`);
-                                                                pushedDocIds.push(doc.id);
-                                                                actuallyPushedDocs.push({ name: doc.name, content: doc.content });
-                                                            } catch (e) {
-                                                                console.error(`❌ Failed to push ${doc.name}:`, e.message);
-                                                            }
-                                                        }
-                                                        if (pushedDocIds.length > 0) {
-                                                            setStagedFiles(prev => prev.filter(f => !pushedDocIds.includes(f.id)));
-                                                            const skipped = pushedDocIds.length - actuallyPushedDocs.length;
-                                                            const summary = actuallyPushedDocs.map(d => d.name).join(', ');
-                                                            const msg = skipped > 0
-                                                                ? `Pushed ${actuallyPushedDocs.length} doc${actuallyPushedDocs.length !== 1 ? 's' : ''} (${skipped} unchanged): ${summary}`
-                                                                : `Pushed ${actuallyPushedDocs.length} doc${actuallyPushedDocs.length !== 1 ? 's' : ''}: ${summary}`;
-                                                            await showAlert(msg, '📄 Docs Pushed');
-
-                                                            // Check actually-changed docs for concepts (skip unchanged)
-                                                            if (actuallyPushedDocs.length > 0) {
-                                                                checkPushedDocsForConcepts(actuallyPushedDocs, globalStreams, showConfirm, showPrompt, {
-                                                                    uid: firebaseUid,
-                                                                    updateStream: WorkStreamService.update.bind(WorkStreamService)
-                                                                }).catch(e => console.error('[Concepts] Error during concept check:', e));
-                                                            }
-                                                        } else if (totalDocs > 0) {
-                                                            await showAlert('No docs were pushed — check console for errors.', '⚠️ Doc Push Failed');
-                                                        }
-                                                    }
-                                                }
-                                                } finally {
-                                                    setBatchActionRunning(false);
-                                                }
-                                                
-                                                // v8.36.1: Smart reset — use app's intelligent default, not always TEST
-                                                setDeployTarget(prev => ({ ...prev, target: getSmartTarget(prev.appId) }));
-                                            };
-                                            
-                                            if (hasMismatch) {
-                                                const confirmed = await showConfirm(
-                                                    `File detected as ${apps[primaryDetected]?.name} but deploying to ${apps[deployTarget.appId]?.name}. Continue anyway?`,
-                                                    'Deploy Mismatch Warning'
-                                                );
-                                                if (confirmed) await executeBatchAction();
-                                            } else {
-                                                await executeBatchAction();
-                                            }
-                                        }}
-                                            disabled={buttonDisabled}
-                                            className={`w-full p-3 rounded font-medium flex items-center justify-center gap-2 transition-all ${buttonStyle}`}>
-                                            {isDeploying || batchActionRunning ? (
-                                                <>
-                                                    <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                                                    {batchActionRunning && !isDeploying ? 'Pushing docs...' : 'Deploying...'}
-                                                </>
-                                            ) : deployCompleted ? (
-                                                <>
-                                                    ✓ Deployed! Click to deploy again
-                                                </>
-                                            ) : hasValidationError ? (
-                                                <>
-                                                    🚫 Fix errors to deploy
-                                                </>
-                                            ) : (
-                                                <>
-                                                    {buttonPrefix}{selectedDeployFiles.length > 0 
-                                                        ? (selectedDeployFiles.length === 1 ? 'Deploy File' : `Batch Deploy ${selectedDeployFiles.length} Files`)
-                                                        : ''}{selectedDeployFiles.length > 0 && selectedDocFiles.length > 0 ? ' + ' : ''}{selectedDocFiles.length > 0 ? `Push ${selectedDocFiles.length} Docs` : ''}
-                                                    {' → '}{deployTarget.target.toUpperCase()}
-                                                </>
-                                            )}
-                                        </button>
-                                        );
-                                    })()}
-                                </div>
-                                );
-                            })()}
-                            
-                            {/* File List */}
-                            <div className="space-y-2">
-                                {stagedFiles.map(f => {
-                                    const isHtml = f.name.endsWith('.html');
-                                    const willRename = isHtml && f.targetPath === 'index.html' && f.name !== 'index.html';
-                                    
-                                    return (
-                                    <div key={f.id} className={`p-3 rounded-lg border ${
-                                        selectedFileIds.has(f.id) ? 'bg-indigo-900/50 border-indigo-500' : 'bg-slate-700/50 border-slate-600'
-                                    }`}>
-                                        <div className="flex items-center gap-3">
-                                            <input type="checkbox" checked={selectedFileIds.has(f.id)}
-                                                onChange={() => toggleFileSelection(f)} className="w-4 h-4" />
-                                            <span className="text-xl">{getFileIcon(f.name)}</span>
-                                            <div className="flex-1 min-w-0">
-                                                {/* Source filename */}
-                                                <div className="font-medium truncate text-slate-300">{f.name}</div>
-                                                
-                                                {/* File info */}
-                                                <div className="text-xs text-slate-400 flex items-center gap-2 flex-wrap mt-0.5">
-                                                    {formatBytes(f.size)}
-                                                    {f.version && (
-                                                        <span className="px-1.5 py-0.5 bg-slate-600 rounded">
-                                                            {formatVersion(f.version)}
-                                                            {f.versionSource === 'html' && <span className="text-green-400 ml-1">✓</span>}
-                                                        </span>
-                                                    )}
-                                                    {/* App detection badge */}
-                                                    {f.suggestedApp && apps[f.suggestedApp] && (
-                                                        <span className={`px-1.5 py-0.5 rounded flex items-center gap-1 ${
-                                                            f.appDetection 
-                                                                ? f.appDetection.method === 'gs-app-id'
-                                                                    ? 'bg-emerald-700 text-emerald-100'
-                                                                    : f.appDetection.confidence === 'high' 
-                                                                        ? 'bg-green-700 text-green-100' 
-                                                                        : 'bg-yellow-700 text-yellow-100'
-                                                                : 'bg-slate-600 text-slate-300'
-                                                        }`} title={f.appDetection 
-                                                            ? f.appDetection.method === 'gs-app-id'
-                                                                ? 'Identified by gs-app-id meta tag (definite)'
-                                                                : `Detected by pattern matching (${f.appDetection.matchCount} matches)`
-                                                            : 'From filename'}>
-                                                            <AppIcon icon={apps[f.suggestedApp].icon} size={16} />
-                                                            <span>{apps[f.suggestedApp].name}</span>
-                                                            {f.appDetection && (
-                                                                <span className="text-xs opacity-75">
-                                                                    {f.appDetection.method === 'gs-app-id' ? '✓' : f.appDetection.confidence === 'high' ? '🎯' : '❓'}
-                                                                </span>
-                                                            )}
-                                                        </span>
-                                                    )}
-                                                    {!f.isText && <span className="text-amber-400">binary</span>}
-                                                </div>
-                                                
-                                                {/* Target path section */}
-                                                <div className={`mt-2 p-2 rounded border ${
-                                                    f.fileAction === 'push-doc' 
-                                                        ? 'bg-cyan-900/20 border-cyan-700/50' 
-                                                        : 'bg-slate-800 border-slate-600'
-                                                }`}>
-                                                    <div className="text-xs text-slate-500 mb-1">
-                                                        {f.fileAction === 'push-doc' ? '📄 Push to repo:' : 'Deploy as:'}
-                                                    </div>
-                                                    <div className="flex items-center gap-2">
-                                                        <input type="text" value={f.targetPath} 
-                                                            onChange={e => onUpdateStagedFile(f.id, { targetPath: e.target.value })}
-                                                            onClick={e => e.stopPropagation()}
-                                                            className="flex-1 text-sm bg-slate-900 border border-slate-500 rounded px-2 py-1 font-mono text-white"
-                                                            placeholder="index.html" />
-                                                        {isHtml && f.name !== 'index.html' && (
-                                                            <button 
-                                                                onClick={(e) => {
-                                                                    e.stopPropagation();
-                                                                    onUpdateStagedFile(f.id, { 
-                                                                        targetPath: f.targetPath === 'index.html' ? f.name : 'index.html' 
-                                                                    });
-                                                                }}
-                                                                className={`px-2 py-1 text-xs rounded whitespace-nowrap ${
-                                                                    f.targetPath === 'index.html' 
-                                                                        ? 'bg-green-700 text-green-100' 
-                                                                        : 'bg-slate-600 text-slate-300 hover:bg-slate-500'
-                                                                }`}>
-                                                                {f.targetPath === 'index.html' ? '✓ Replace index.html' : 'Use index.html'}
-                                                            </button>
-                                                        )}
-                                                    </div>
-                                                    {willRename && (
-                                                        <div className="mt-1.5 text-xs text-green-400 flex items-center gap-1">
-                                                            <span>📝</span> Will replace existing index.html
-                                                        </div>
-                                                    )}
-                                                    {isHtml && f.targetPath !== 'index.html' && f.name !== 'index.html' && (
-                                                        <div className="mt-1.5 text-xs text-amber-400 flex items-center gap-1">
-                                                            <span>⚠️</span> Will create new file (won't replace index.html)
-                                                        </div>
-                                                    )}
-                                                    
-                                                    {/* Version warnings */}
-                                                    {f.versionValidation && !f.versionValidation.isValid && (
-                                                        <div className="mt-2 p-2 bg-red-900/30 border border-red-700 rounded">
-                                                            <div className="flex items-center justify-between mb-2">
-                                                                <div className="text-xs font-medium text-red-300 flex items-center gap-1">
-                                                                    🔴 Version Issues Detected
-                                                                </div>
-                                                                <button 
-                                                                    onClick={async (e) => {
-                                                                        e.stopPropagation();
-                                                                        let targetVersion = f.version;
-                                                                        if (!targetVersion) {
-                                                                            targetVersion = await showPrompt(
-                                                                                'What version should all version strings be set to?',
-                                                                                '1.0.0',
-                                                                                'Enter Target Version'
-                                                                            );
-                                                                        }
-                                                                        if (targetVersion) {
-                                                                            const fixedContent = fixVersionsInContent(f.content, targetVersion);
-                                                                            const newValidation = validateVersions(fixedContent, f.name);
-                                                                            onUpdateStagedFile(f.id, { 
-                                                                                content: fixedContent,
-                                                                                version: targetVersion,
-                                                                                versionValidation: newValidation
-                                                                            });
-                                                                        }
-                                                                    }}
-                                                                    className="px-2 py-1 bg-green-700 hover:bg-green-600 text-xs rounded flex items-center gap-1">
-                                                                    🔧 Fix to v{f.version || '?'}
-                                                                </button>
-                                                            </div>
-                                                            
-                                                            {f.versionValidation.missing.length > 0 && (
-                                                                <div className="text-xs text-amber-300 mb-1">
-                                                                    Missing: {f.versionValidation.missing.join(', ')}
-                                                                </div>
-                                                            )}
-                                                            
-                                                            {f.versionValidation.uniqueVersions.length > 1 && (
-                                                                <div className="text-xs text-red-300 mb-1">
-                                                                    Found {f.versionValidation.uniqueVersions.length} different versions: {f.versionValidation.uniqueVersions.join(', ')}
-                                                                </div>
-                                                            )}
-                                                            
-                                                            <div className="text-xs text-slate-400 space-y-0.5 max-h-24 overflow-auto">
-                                                                {f.versionValidation.allVersions.map((v, i) => (
-                                                                    <div key={i} className={v.value === f.versionValidation.primary ? 'text-green-400' : 'text-red-300'}>
-                                                                        {v.value} ← {v.source} (line {v.line})
-                                                                    </div>
-                                                                ))}
-                                                            </div>
-                                                        </div>
-                                                    )}
-                                                    
-                                                    {f.versionValidation && f.versionValidation.isValid && (
-                                                        <div className="mt-2 text-xs text-green-400 flex items-center gap-1">
-                                                            ✓ All {f.versionValidation.allVersions.length} version strings match (v{f.versionValidation.primary})
-                                                        </div>
-                                                    )}
-                                                </div>
-                                            </div>
-                                            <button onClick={e => { 
-                                                e.stopPropagation(); 
-                                                setSelectedFileIds(prev => {
-                                                    const newSet = new Set(prev);
-                                                    newSet.delete(f.id);
-                                                    return newSet;
-                                                });
-                                                onRemove(f.id); 
-                                            }} className="px-2 py-1 text-slate-400 hover:text-white hover:bg-red-600 rounded self-start flex items-center gap-1 transition-colors" title="Remove file">
-                                                <Icons.X /> <span className="text-xs">Remove</span>
-                                            </button>
-                                        </div>
-                                    </div>
-                                    );
-                                })}
-                            </div>
-                        </div>
-                    )}
-
-                    {/* Active Deployments - Multiple Status Boxes */}
-                    {activeDeployments && activeDeployments.length > 0 && (
-                        <div className="space-y-3">
-                            {activeDeployments.map(deployment => (
-                                <div key={deployment.id} className={`bg-slate-800 rounded-xl border p-4 fade-in ${
-                                    deployment.status === 'running' ? 'border-indigo-500' :
-                                    deployment.status === 'success' ? 'border-green-500' : 'border-red-500'
-                                }`}>
-                                    <h2 className="text-sm font-semibold mb-3 flex items-center gap-2">
-                                        {deployment.status === 'running' ? (
-                                            <div className="w-4 h-4 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
-                                        ) : deployment.status === 'success' ? (
-                                            <span className="text-green-400">✓</span>
-                                        ) : (
-                                            <span className="text-red-400">✗</span>
-                                        )}
-                                        <span className="text-slate-300">{deployment.appName || 'Deploy'}</span>
-                                        {deployment.target && <span className="text-xs px-1.5 py-0.5 rounded bg-slate-700 text-slate-400">{deployment.target.toUpperCase()}</span>}
-                                        {deployment.status === 'running' 
-                                            ? <span className="text-indigo-300">{deployment.isRollback ? 'Rolling back' : deployment.isPromotion ? 'Promoting' : 'Deploying'}...</span>
-                                            : deployment.status === 'success' ? <span className="text-green-400">Complete!</span> : <span className="text-red-400">Failed</span>
-                                        }
-                                        {deployment.fileCount && <span className="text-xs text-slate-500">({deployment.fileCount} files)</span>}
-                                        <span className="flex-1" />
-                                        {/* Show close button for errors, success auto-closes */}
-                                        {deployment.status !== 'running' && deployment.status !== 'success' && (
-                                            <button onClick={() => removeActiveDeployment(deployment.id)} className="text-slate-400 hover:text-white">
-                                                <Icons.X />
-                                            </button>
-                                        )}
-                                        {/* Show manual close for success too */}
-                                        {deployment.status === 'success' && (
-                                            <button onClick={() => removeActiveDeployment(deployment.id)} className="text-slate-500 hover:text-white text-xs">
-                                                ✕
-                                            </button>
-                                        )}
-                                    </h2>
-                                    <div className="space-y-1.5">
-                                        {deployment.steps.map((s, i) => (
-                                            <div key={i} className="flex items-center gap-2 text-sm">
-                                                <div className={`w-4 h-4 rounded-full flex items-center justify-center text-xs ${
-                                                    s.status === 'complete' ? 'bg-green-500' :
-                                                    s.status === 'running' ? 'bg-indigo-500' :
-                                                    s.status === 'error' ? 'bg-red-500' : 'bg-amber-500'
-                                                }`}>
-                                                    {s.status === 'complete' ? '✓' : s.status === 'running' ? '•' : '!'}
-                                                </div>
-                                                <span className={s.status === 'error' ? 'text-red-400' : 'text-slate-300'}>{s.name}</span>
-                                                {s.details && <span className="text-slate-500 text-xs">({s.details})</span>}
-                                            </div>
-                                        ))}
-                                    </div>
-                                    {deployment.status === 'success' && deployment.url && (
-                                        <a href={deployment.url} target="_blank" className="mt-2 inline-flex items-center gap-1 text-indigo-400 hover:underline text-sm">
-                                            <Icons.ExternalLink /> Open Site
-                                        </a>
-                                    )}
-                                    {deployment.workflowUrl && (
-                                        <a href={deployment.workflowUrl} target="_blank" className="mt-2 ml-3 inline-flex items-center gap-1 text-amber-400 hover:underline text-sm">
-                                            <Icons.ExternalLink /> View Workflow
-                                        </a>
-                                    )}
-                                </div>
-                            ))}
-                        </div>
-                    )}
-
-                    {/* v8.53.0: App Cards — THE HERO (full-width, by project) */}
-                    {projects.filter(proj => {
-                        const projDef = config?.projects?.[proj.id];
-                        return (projDef?.state || 'active') !== 'hidden';
-                    }).map(proj => {
-                        const colors = getProjectColor(proj.color);
-                        const effectiveCollapsed = collapsedProjects[proj.id] ?? (proj.id !== projects[0]?.id);
-                        const hasActiveDeploy = proj.apps.some(a => 
-                            activeDeployments?.some(d => d.appId === a.id && d.status === 'running') ||
-                            (deployingRepos && Object.keys(deployingRepos).some(k => k.startsWith(a.id + ':')))
-                        );
-                        const finalCollapsed = hasActiveDeploy ? false : effectiveCollapsed;
-                        
-                        return (
-                            <div key={proj.id} className={`rounded-xl border overflow-hidden ${colors.border} ${finalCollapsed ? '' : colors.bg}`}>
-                                <div 
-                                    className={`p-3 cursor-pointer hover:bg-white/5 flex items-center gap-3 transition-colors ${hasActiveDeploy && !finalCollapsed ? 'cursor-default' : ''}`}
-                                    onClick={() => {
-                                        // Don't allow collapsing while a deploy is running in this project
-                                        if (hasActiveDeploy && !finalCollapsed) return;
-                                        setCollapsedProjects(prev => {
-                                            const next = { ...prev, [proj.id]: !finalCollapsed };
-                                            localStorage.setItem('cc_collapsedProjects', JSON.stringify(next));
-                                            return next;
-                                        });
-                                    }}
-                                >
-                                    <span className={`transform transition-transform text-xs ${finalCollapsed ? '' : 'rotate-90'}`}>▶</span>
-                                    <AppIcon icon={proj.icon} size={22} />
-                                    <div className="flex-1">
-                                        <span className={`font-semibold text-sm ${colors.text}`}>{proj.name}</span>
-                                        <span className="text-xs text-slate-500 ml-2">{proj.apps.length} app{proj.apps.length !== 1 ? 's' : ''}</span>
-                                    </div>
-                                    {finalCollapsed && (
-                                        <div className="flex items-center gap-2">
-                                            {proj.apps.filter(a => a.currentProdVersion).length > 0 && (
-                                                <span className="text-xs text-slate-500">{proj.apps.filter(a => a.currentProdVersion).length}/{proj.apps.length} deployed</span>
-                                            )}
-                                            {hasActiveDeploy && <span className="text-xs text-amber-400 animate-pulse">● deploying</span>}
-                                        </div>
-                                    )}
-                                </div>
-                                
-                                {!finalCollapsed && (
-                                    <div className="px-3 pb-3 space-y-2">
-                                        {proj.apps.map(app => {
-                                            const isPublicStyle = app.appType === 'public' || !app.appType;
-                                            const isInternal = app.appType === 'internal';
-                                            const canPromote = app.testRepo && app.prodRepo && app.currentTestVersion && app.currentTestVersion !== app.currentProdVersion;
-                                            const testDeploying = deployingRepos && deployingRepos[`${app.id}:test`];
-                                            const prodDeploying = deployingRepos && deployingRepos[`${app.id}:prod`];
-                                            const effectiveSubPath = getEffectiveSubPath(app, app.id);
-                                            const testUrl = getGitHubPagesUrl(app.testRepo, effectiveSubPath);
-                                            const prodUrl = getGitHubPagesUrl(app.prodRepo, effectiveSubPath);
-                                            const isExpanded = expandedApps[app.id];
-                                            const info = appInfo[app.id];
-                                            const isLoadingInfo = loadingAppInfo[app.id];
-                                            
-                                            const activeWI = (globalWorkItems || []).filter(wi => wi.appId === app.id && ['idea','ready','in-progress'].includes(wi.status));
-                                            
-                                            return (
-                                                <div key={app.id} className="bg-slate-700/50 rounded-lg overflow-hidden">
-                                                    <div className="p-3 cursor-pointer hover:bg-slate-700/70" onClick={() => toggleAppExpanded(app.id)}>
-                                                        <div className="flex items-center gap-2 mb-2">
-                                                            <span className={`transform transition-transform text-xs ${isExpanded ? 'rotate-90' : ''}`}>▶</span>
-                                                            <AppIcon icon={app.icon} size={20} />
-                                                            <span className="font-medium flex-1">{app.name}</span>
-                                                            {/* Maturity badge */}
-                                                            {app.lifecycle?.currentMaturity && (() => {
-                                                                const m = app.lifecycle.currentMaturity;
-                                                                const maturityStyles = {
-                                                                    seed: 'bg-slate-700 text-slate-300',
-                                                                    prototype: 'bg-amber-900/50 text-amber-300',
-                                                                    alpha: 'bg-orange-900/50 text-orange-300',
-                                                                    beta: 'bg-blue-900/50 text-blue-300',
-                                                                    production: 'bg-green-900/50 text-green-300'
-                                                                };
-                                                                return (
-                                                                    <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${maturityStyles[m] || maturityStyles.seed}`} title={`Maturity: ${m}${app.lifecycle.maturityTarget ? ' → ' + app.lifecycle.maturityTarget : ''}`}>
-                                                                        {m}
-                                                                    </span>
-                                                                );
-                                                            })()}
-                                                            {activeWI.length > 0 && (
-                                                                <span className="px-1.5 py-0.5 bg-indigo-900/50 text-indigo-300 rounded text-xs" title={`${activeWI.length} active work items`}>
-                                                                    📋 {activeWI.length}
-                                                                </span>
-                                                            )}
-                                                            {(() => {
-                                                                const aIds = (globalIdeas || []).filter(i => i.appId === app.id).map(i => i.id);
-                                                                const cnt = (globalConcepts || []).filter(c => aIds.includes(c.ideaOrigin) && c.status === 'active').length;
-                                                                return cnt > 0 ? <span className="px-1.5 py-0.5 bg-purple-900/50 text-purple-300 rounded text-xs" title={`${cnt} active concepts`}>💡 {cnt}</span> : null;
-                                                            })()}
-                                                            {/* [v8.63.0] active session badge removed */}
-                                                            {isInternal && <span className="text-xs text-slate-500">internal</span>}
-                                                            {canPromote && (
-                                                                <button onClick={(e) => { e.stopPropagation(); onPromote(app.id); }}
-                                                                    className="px-2 py-1 bg-amber-600 text-xs rounded flex items-center gap-1">
-                                                                    <Icons.Zap className="w-3 h-3" /> Promote
-                                                                </button>
-                                                            )}
-                                                            {/* [v8.63.0] Session launch button removed */}
-                                                        </div>
-                                                        {/* Repo info */}
-                                                        {isPublicStyle && app.testRepo && (
-                                                            <div className="text-xs text-slate-500 mb-2 font-mono ml-6">
-                                                                {app.testRepo ? app.testRepo.split('/')[1] : '(no test)'} → {app.prodRepo ? app.prodRepo.split('/')[1] : '(no prod)'}
-                                                            </div>
-                                                        )}
-                                                        {/* Version badges */}
-                                                        <div className="flex items-center gap-2 text-xs ml-6">
-                                                            {app.testRepo && (
-                                                                <div className="flex items-center gap-1">
-                                                                    <span className={`px-2 py-0.5 rounded ${app.currentTestVersion ? 'bg-blue-900/50 text-blue-300' : 'bg-slate-600 text-slate-400'}`}>
-                                                                        TEST: {formatVersion(app.currentTestVersion)}
-                                                                    </span>
-                                                                    {testUrl && (
-                                                                        <a href={testUrl} target="_blank" onClick={e => e.stopPropagation()}
-                                                                            className={`p-1 rounded flex items-center ${testDeploying ? 'bg-red-900/50 text-red-400 animate-pulse' : 'hover:bg-slate-600 text-slate-400'}`}
-                                                                            title={testDeploying ? 'Deploying...' : 'Open TEST'}>
-                                                                            <Icons.Play />
-                                                                        </a>
-                                                                    )}
-                                                                </div>
-                                                            )}
-                                                            {app.testRepo && app.prodRepo && <Icons.ArrowRight className="w-4 h-4 text-slate-500" />}
-                                                            <div className="flex items-center gap-1">
-                                                                <span className={`px-2 py-0.5 rounded ${app.currentProdVersion ? 'bg-green-900/50 text-green-300' : 'bg-slate-600 text-slate-400'}`}>
-                                                                    {app.testRepo ? 'PROD' : ''}: {formatVersion(app.currentProdVersion)}
-                                                                </span>
-                                                                {prodUrl && (
-                                                                    <a href={prodUrl} target="_blank" onClick={e => e.stopPropagation()}
-                                                                        className={`p-1 rounded flex items-center ${prodDeploying ? 'bg-red-900/50 text-red-400 animate-pulse' : 'hover:bg-slate-600 text-slate-400'}`}
-                                                                        title={prodDeploying ? 'Deploying...' : 'Open PROD'}>
-                                                                        <Icons.Play />
-                                                                    </a>
-                                                                )}
-                                                            </div>
-                                                        </div>
-                                                    </div>
-                                                    {isExpanded && (
-                                                        <div className="px-3 pb-3 border-t border-slate-600 pt-2 ml-6 text-xs space-y-3">
-                                                            {isLoadingInfo ? (
-                                                                <div className="text-slate-400 flex items-center gap-2">
-                                                                    <div className="w-3 h-3 border border-slate-400 border-t-transparent rounded-full animate-spin" />
-                                                                    Loading...
-                                                                </div>
-                                                            ) : info ? (
-                                                                <div className="space-y-2">
-                                                                    {info.test && <div className="text-slate-400">Test push: {formatRelativeTime(info.test.pushedAt)}</div>}
-                                                                    {info.prod && <div className="text-slate-400">Prod push: {formatRelativeTime(info.prod.pushedAt)}</div>}
-                                                                </div>
-                                                            ) : null}
-                                                            <div className="flex items-center gap-2 flex-wrap">
-                                                                {app.prodRepo && (
-                                                                    <button onClick={() => forceRebuild(app.prodRepo, 'prod')}
-                                                                        className="px-2 py-1 bg-green-700 hover:bg-green-600 rounded">🔄 Force Rebuild</button>
-                                                                )}
-                                                                <button onClick={() => fetchAppInfo(app.id)}
-                                                                    className="px-2 py-1 bg-slate-700 hover:bg-slate-600 rounded flex items-center gap-1">
-                                                                    <Icons.Refresh className="w-3 h-3" /> Refresh
-                                                                </button>
-                                                                {rollbackSnapshots[`${app.id}:prod`] && (
-                                                                    <button onClick={() => onQuickRollback(app.id, 'prod')}
-                                                                        className="px-2 py-1 bg-amber-700 hover:bg-amber-600 rounded">
-                                                                        ⏪ Rollback to v{rollbackSnapshots[`${app.id}:prod`].version}
-                                                                    </button>
-                                                                )}
-                                                            </div>
-                                                        </div>
-                                                    )}
-                                                </div>
-                                            );
-                                        })}
-                                    </div>
-                                )}
-                            </div>
-                        );
-                    })}
+                {/* ═══ INBOUND: Drop Box (unchanged from previous version) ═══ */}
+                <div
+                    onDrop={onFileDrop}
+                    onDragOver={e => { e.preventDefault(); e.currentTarget.classList.add('border-indigo-500', 'bg-indigo-900/20', 'py-8'); e.currentTarget.classList.remove('py-3', 'border-slate-600'); }}
+                    onDragLeave={e => { e.currentTarget.classList.remove('border-indigo-500', 'bg-indigo-900/20', 'py-8'); e.currentTarget.classList.add('py-3', 'border-slate-600'); }}
+                    className="border-2 border-dashed border-slate-600 rounded-lg py-3 px-4 text-center transition-all duration-200 cursor-pointer"
+                >
+                    <input type="file" multiple accept=".html,.js,.css,.json,.zip,.yml,.yaml,.md,.txt" onChange={onFileDrop} className="hidden" id="upload" />
+                    <label htmlFor="upload" className="cursor-pointer flex items-center justify-center gap-3 text-sm text-slate-400">
+                        <Icons.Upload />
+                        <span>Drop files to deploy, or drop a session package to review</span>
+                        <span className="text-xs text-slate-500">Multi-file • ZIP • Multi-app</span>
+                    </label>
                 </div>
-                
-                {/* v8.53.0: Post-Deploy Summary Panel (Phase C) */}
-                {activeDeployments && activeDeployments.filter(d => d.status === 'success').length > 0 && (() => {
-                    const successDeploys = activeDeployments.filter(d => d.status === 'success');
-                    const latestDeploy = successDeploys[0];
-                    const deployApp = latestDeploy?.appId ? apps[latestDeploy.appId] : null;
-                    const matchedReturn = pendingSessionReturn;
-                    const activeSessions = (globalSessions || []).filter(s => 
-                        s.appId === latestDeploy?.appId && (s.status === 'prep' || s.status === 'in-progress')
-                    );
-                    const matchedSession = activeSessions[0];
-                    
-                    return (
-                        <div className="bg-slate-800 rounded-xl border border-green-600/50 p-4 space-y-3">
-                            <div className="flex items-center justify-between">
-                                <div className="flex items-center gap-2">
-                                    <span className="text-green-400 text-lg">✅</span>
-                                    <span className="font-medium">
-                                        Deployed {deployApp?.name || latestDeploy?.appName || 'App'}
-                                        {latestDeploy?.version ? ` v${latestDeploy.version}` : ''}
-                                        {latestDeploy?.target ? ` to ${latestDeploy.target.toUpperCase()}` : ''}
-                                    </span>
+
+                {/* Phase 3: Pending ODRC Import banner */}
+                {pendingOdrcImport && (
+                    <div className="bg-purple-900/30 border border-purple-600/50 rounded-xl p-4 flex items-center justify-between">
+                        <div className="flex items-center gap-3">
+                            <span className="text-2xl">💡</span>
+                            <div>
+                                <div className="text-sm font-medium text-purple-200">ODRC Updates detected — {pendingOdrcImport.parsedUpdates.length} item{pendingOdrcImport.parsedUpdates.length !== 1 ? 's' : ''}</div>
+                                <div className="text-xs text-purple-400/70 mt-0.5">
+                                    From: {pendingOdrcImport.fileName}
+                                    {pendingOdrcImport.metadata?.ideaId && ` · IdeaId: ${pendingOdrcImport.metadata.ideaId}`}
+                                    {pendingOdrcImport.metadata?.ideaSlug && ` · Idea: ${pendingOdrcImport.metadata.ideaSlug}`}
+                                    {pendingOdrcImport.metadata?.sessionNumber && ` · Session: ${pendingOdrcImport.metadata.sessionNumber}`}
                                 </div>
-                                <button onClick={() => removeActiveDeployment(latestDeploy.id)} className="text-slate-400 hover:text-white text-xs">✕ Dismiss</button>
-                            </div>
-                            
-                            {/* Session match */}
-                            {matchedSession && (
-                                <div className="text-sm text-indigo-300 flex items-center gap-1">
-                                    📋 Matches session <span className="font-mono text-xs">{matchedSession.id}</span> ({matchedSession.type})
-                                </div>
-                            )}
-                            
-                            {/* SESSION_RETURN.json results — auto-processed */}
-                            {matchedReturn && matchedReturn.data && (
-                                <div className="bg-slate-900/50 rounded-lg p-3 space-y-2 text-sm">
-                                    <div className="text-xs font-medium text-slate-400 mb-1">Session Results (auto-applied)</div>
-                                    {matchedReturn.data.summary && (
-                                        <div className="text-slate-300">{matchedReturn.data.summary}</div>
-                                    )}
-                                    {(matchedReturn.data.workItems || []).filter(wi => wi.status === 'completed').map((wi, i) => (
-                                        <div key={i} className="text-green-400 text-xs flex items-center gap-1">✅ "{wi.title || wi.id}" — completed</div>
-                                    ))}
-                                    {(matchedReturn.data.discoveredIssues || []).map((issue, i) => (
-                                        <div key={`iss-${i}`} className="text-red-400 text-xs flex items-center gap-1">🐛 Issue: {issue.title}</div>
-                                    ))}
-                                    {(matchedReturn.data.discoveredIdeas || []).map((idea, i) => (
-                                        <div key={`idea-${i}`} className="text-blue-400 text-xs flex items-center gap-1">💡 Idea: {idea.title}</div>
-                                    ))}
-                                </div>
-                            )}
-                            
-                            {/* Action buttons */}
-                            <div className="flex items-center gap-2 text-xs">
-                                {latestDeploy?.url && (
-                                    <a href={latestDeploy.url} target="_blank" className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 rounded font-medium flex items-center gap-1 no-underline text-white">
-                                        <Icons.ExternalLink /> View Site
-                                    </a>
-                                )}
-                                {deployApp?.testRepo && deployApp?.prodRepo && (
-                                    <button onClick={() => setModal({ type: 'promote', data: { appId: latestDeploy.appId } })}
-                                        className="px-3 py-1.5 bg-green-700 hover:bg-green-600 rounded font-medium">
-                                        ⬆ Promote to Prod
-                                    </button>
-                                )}
-                                {/* [v8.63.0] Review session button removed */}
                             </div>
                         </div>
-                    );
-                })()}
-                
-                {/* v8.53.0: Pipeline Summary Bar (collapsed) */}
-                {productMetrics.totalActive > 0 && (
-                    <details className="bg-slate-800 rounded-xl border border-slate-700 overflow-hidden">
-                        <summary className="px-4 py-3 cursor-pointer hover:bg-slate-700/50 flex items-center gap-3 text-sm select-none">
-                            <span className="text-slate-400">Pipeline:</span>
-                            {productMetrics.pipeline.ready > 0 && <span className="text-blue-400">{productMetrics.pipeline.ready} ready</span>}
-                            {productMetrics.pipeline['in-progress'] > 0 && <><span className="text-slate-600">│</span><span className="text-amber-400">{productMetrics.pipeline['in-progress']} in-progress</span></>}
-                            {productMetrics.shippedThisMonth.length > 0 && <><span className="text-slate-600">│</span><span className="text-green-400">{productMetrics.shippedThisMonth.length} shipped this month</span></>}
-                            {productMetrics.staleItems.length > 0 && <><span className="text-slate-600">│</span><span className="text-amber-400">⚠️ {productMetrics.staleItems.length} stale</span></>}
-                            <span className="ml-auto text-slate-500 text-xs">expand ▼</span>
-                        </summary>
-                        <div className="px-4 pb-4 space-y-3">
-                            {/* Pipeline bar */}
-                            <div className="h-4 rounded-full overflow-hidden flex bg-slate-700">
-                                {[
-                                    { key: 'idea', label: 'Ideas', count: productMetrics.pipeline.idea, color: '#64748b' },
-                                    { key: 'ready', label: 'Ready', count: productMetrics.pipeline.ready, color: '#3b82f6' },
-                                    { key: 'in-progress', label: 'In Progress', count: productMetrics.pipeline['in-progress'], color: '#f59e0b' },
-                                    { key: 'review', label: 'Review', count: productMetrics.pipeline.review, color: '#a855f7' },
-                                ].filter(s => s.count > 0).map(s => (
-                                    <div key={s.key} 
-                                        style={{ width: `${(s.count / productMetrics.totalActive) * 100}%`, backgroundColor: s.color }}
-                                        className="h-full flex items-center justify-center text-[10px] font-medium text-white/90 min-w-[18px]"
-                                        title={`${s.label}: ${s.count}`}>
-                                        {(s.count / productMetrics.totalActive) > 0.12 ? s.count : ''}
-                                    </div>
-                                ))}
-                            </div>
-                            <div className="flex flex-wrap gap-3 text-xs">
-                                {Object.entries(productMetrics.pipeline).filter(([_, v]) => v > 0).map(([status, count]) => {
-                                    const colors = { idea: 'text-slate-400', ready: 'text-blue-400', 'in-progress': 'text-amber-400', review: 'text-purple-400' };
-                                    return (
-                                        <span key={status} className={colors[status] || 'text-slate-400'}>
-                                            {status === 'in-progress' ? 'WIP' : status.charAt(0).toUpperCase() + status.slice(1)}: {count}
-                                        </span>
-                                    );
-                                })}
-                            </div>
-                            {productMetrics.staleItems.length > 0 && (
-                                <div className="flex items-center gap-2 text-xs text-amber-400 bg-amber-900/20 rounded-lg px-3 py-2">
-                                    ⚠️ {productMetrics.staleItems.length} item{productMetrics.staleItems.length !== 1 ? 's' : ''} stale (7+ days in-progress)
-                                </div>
-                            )}
-                            <button onClick={() => setView('ideas')} className="text-xs text-indigo-400 hover:text-indigo-300">View All →</button>
+                        <div className="flex gap-2">
+                            <button onClick={() => setPendingOdrcImport(null)}
+                                className="px-3 py-1.5 text-xs font-medium bg-slate-700 hover:bg-slate-600 text-white rounded-lg transition-colors">
+                                Dismiss
+                            </button>
+                            <button onClick={() => setPendingOdrcImport({ ...pendingOdrcImport, showChecklist: true })}
+                                className="px-3 py-1.5 text-xs font-medium bg-purple-600 hover:bg-purple-500 text-white rounded-lg transition-colors">
+                                Review & Import
+                            </button>
                         </div>
-                    </details>
+                    </div>
                 )}
+
+                {/* ═══ SUMMARY STATS + NEW IDEA (T3) ═══ */}
+                <div className="flex items-center gap-3">
+                    <span
+                        onClick={() => setView('ideas')}
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-sm text-slate-400 cursor-pointer hover:text-slate-200 hover:border-slate-600 transition-colors"
+                    >
+                        <span className="font-bold font-mono text-indigo-400">{activeIdeaCount}</span> Active Ideas
+                    </span>
+                    <span
+                        onClick={() => setView('projects')}
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-sm text-slate-400 cursor-pointer hover:text-slate-200 hover:border-slate-600 transition-colors"
+                    >
+                        <span className="font-bold font-mono text-indigo-400">{activeAppCount}</span> Apps
+                    </span>
+                    <div className="flex-1" />
+                    <button
+                        onClick={() => { if (setViewPayload) setViewPayload({ createIdea: true }); setView('ideas'); }}
+                        className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-semibold text-white"
+                        style={{ background: 'linear-gradient(135deg, #667eea, #764ba2)' }}
+                    >
+                        + New Idea
+                    </button>
+                </div>
+
+                {/* ═══ SECTION HEADER ═══ */}
+                {recentIdeas.length > 0 && (
+                    <div className="text-xs font-semibold text-slate-600 uppercase tracking-widest">
+                        Recent Work
+                    </div>
+                )}
+
+                {/* ═══ OUTBOUND: Work Cards (T2) ═══ */}
+                <div className="space-y-3">
+                    {recentIdeas.map(idea => (
+                        <IdeaWorkCard
+                            key={idea.id}
+                            idea={idea}
+                            onNavigateIdea={handleNavigateIdea}
+                            onNavigateApp={handleNavigateApp}
+                            onContinue={handleContinue}
+                        />
+                    ))}
+                </div>
+
+                {/* ═══ EMPTY STATE (T4) ═══ */}
+                {recentIdeas.length === 0 && (
+                    <div className="text-center py-16">
+                        <div className="text-4xl mb-4">💡</div>
+                        <h3 className="text-lg font-semibold text-slate-300 mb-2">No ideas yet</h3>
+                        <p className="text-sm text-slate-500 mb-6">Create your first idea to start tracking work</p>
+                        <button
+                            onClick={() => { if (setViewPayload) setViewPayload({ createIdea: true }); setView('ideas'); }}
+                            className="px-6 py-3 rounded-lg text-sm font-semibold text-white"
+                            style={{ background: 'linear-gradient(135deg, #667eea, #764ba2)' }}
+                        >
+                            + Create First Idea
+                        </button>
+                    </div>
+                )}
+
+                {/* ═══ EXPLORE IN CHAT MODAL (T7 — Continue button integration) ═══ */}
+                {exploreIdea && (
+                    <ExploreInChatModal
+                        idea={exploreIdea}
+                        onClose={() => setContinueIdea(null)}
+                        configuredApps={configuredApps}
+                        apps={apps}
+                        globalConcepts={globalConcepts}
+                        showAlert={showAlert}
+                        github={github}
+                    />
+                )}
+
+                {/* LEGACY REMOVED: Staged files, deploy controls, app cards, pipeline summary, product metrics
+                    removed in v8.65.0. Content lives in Projects/Deploy views. See git history for reference. */}
 
                 {/* === ODRCImportChecklistModal (v8.64.3 — extracted from IIFE to prevent remount) === */}
                 {pendingOdrcImport?.showChecklist && (
@@ -15394,6 +13645,94 @@ When complete, note: "Completes ${item.id}" in deploy notes.`;
     }
 
     // =========================================================================
+    // =========================================================================
+    // IdeaWorkCard — Landing page card for developer work board (v8.65.0)
+    // =========================================================================
+    const PHASE_COLORS = {
+        exploring:    { stripe: '#3b82f6', bg: 'rgba(59,130,246,0.15)',  text: '#3b82f6' },
+        building:     { stripe: '#22c55e', bg: 'rgba(34,197,94,0.15)',   text: '#22c55e' },
+        converging:   { stripe: '#f59e0b', bg: 'rgba(245,158,11,0.15)', text: '#f59e0b' },
+        'spec-ready': { stripe: '#f093fb', bg: 'rgba(240,147,251,0.15)', text: '#f093fb' }
+    };
+
+    function IdeaWorkCard({ idea, onNavigateIdea, onNavigateApp, onContinue }) {
+        const phase = PHASE_COLORS[idea.phase] || PHASE_COLORS.exploring;
+        const sessionLabel = idea.lastSession
+            ? `Session ${idea.sessionCount}`
+            : 'No sessions';
+        const dateLabel = idea.lastSession
+            ? new Date(idea.lastSession.date).toLocaleString('en-US', {
+                month: 'short', day: 'numeric', year: 'numeric',
+                hour: 'numeric', minute: '2-digit'
+              })
+            : idea.updatedAt
+                ? new Date(idea.updatedAt).toLocaleString('en-US', {
+                    month: 'short', day: 'numeric', year: 'numeric',
+                    hour: 'numeric', minute: '2-digit'
+                  })
+                : '';
+
+        return (
+            <div
+                onClick={() => onNavigateIdea(idea.id)}
+                className="flex items-center gap-4 p-4 rounded-xl border border-slate-700/50 bg-slate-800/50 cursor-pointer transition-all hover:border-slate-600 hover:shadow-lg hover:-translate-y-0.5"
+                title="Go to Idea Detail"
+            >
+                {/* Phase stripe */}
+                <div className="w-1 h-12 rounded-full flex-shrink-0"
+                     style={{ background: phase.stripe }} />
+
+                {/* Card body */}
+                <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 mb-1">
+                        <span className="text-sm font-semibold text-slate-100 truncate">
+                            {idea.name}
+                        </span>
+                        {idea.appId && (
+                            <span
+                                onClick={e => { e.stopPropagation(); onNavigateApp(idea.appId); }}
+                                className="text-xs font-mono px-2 py-0.5 rounded bg-indigo-500/15 text-indigo-400 cursor-pointer hover:bg-indigo-500/25 flex-shrink-0"
+                                title="Go to App"
+                            >
+                                {idea.appName}
+                            </span>
+                        )}
+                    </div>
+                    <div className="flex items-center gap-2 text-xs text-slate-500 flex-wrap">
+                        <span className="px-2 py-0.5 rounded font-semibold uppercase tracking-wider"
+                              style={{ background: phase.bg, color: phase.text, fontSize: '10px' }}>
+                            {idea.phase}
+                        </span>
+                        <span>{sessionLabel}</span>
+                        {dateLabel && (
+                            <React.Fragment>
+                                <span className="opacity-40">·</span>
+                                <span>{dateLabel}</span>
+                            </React.Fragment>
+                        )}
+                        <span className="opacity-40">·</span>
+                        <span className={`font-mono font-semibold ${idea.openCount > 0 ? 'text-amber-400' : 'text-slate-600'}`}>
+                            {idea.openCount} OPEN{idea.openCount !== 1 ? 's' : ''}
+                        </span>
+                    </div>
+                </div>
+
+                {/* Continue button */}
+                <button
+                    onClick={e => { e.stopPropagation(); onContinue(idea); }}
+                    className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-semibold text-white flex-shrink-0 transition-all hover:-translate-y-0.5 hover:shadow-md"
+                    style={{ background: 'linear-gradient(135deg, #667eea, #764ba2)' }}
+                    title="Generate session brief"
+                >
+                    Continue
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M5 12h14M12 5l7 7-7 7"/>
+                    </svg>
+                </button>
+            </div>
+        );
+    }
+
     // ExploreInChatModal — extracted from IdeasView (v8.63.4 fix: prevent remount flicker)
     // Must be top-level so React keeps a stable component reference across parent re-renders
     // =========================================================================
@@ -15599,7 +13938,7 @@ When complete, note: "Completes ${item.id}" in deploy notes.`;
     // IDEAS VIEW — ODRC Concept Management + CLAUDE.md Generation + Idea-to-Chat (v8.61.0)
     // =========================================================================
 
-    function IdeasView({ apps, globalIdeas, globalConcepts, firebaseUid, showAlert, showConfirm, showPrompt, config, setView, github }) {
+    function IdeasView({ apps, globalIdeas, globalConcepts, firebaseUid, showAlert, showConfirm, showPrompt, config, setView, github, viewPayload, setViewPayload }) {
         const [mode, setMode] = React.useState('all'); // 'all' | 'app-aggregate' | 'idea-detail'
         const [selectedAppId, setSelectedAppId] = React.useState(null);
         const [selectedIdeaId, setSelectedIdeaId] = React.useState(null);
@@ -15623,6 +13962,30 @@ When complete, note: "Completes ${item.id}" in deploy notes.`;
             if (!showExploreModal) return null;
             return globalIdeas.find(i => i.id === showExploreModal.ideaId) || null;
         }, [showExploreModal, globalIdeas]);
+
+        // v8.65.0: Deep-link navigation from landing page work cards
+        React.useEffect(() => {
+            if (!viewPayload) return;
+            if (viewPayload.ideaId) {
+                // Navigate to Idea Detail (Mode 3)
+                const idea = globalIdeas.find(i => i.id === viewPayload.ideaId);
+                if (idea) {
+                    if (idea.appId) {
+                        setSelectedAppId(idea.appId);
+                        setSelectedIdeaId(idea.id);
+                        setMode('idea-detail');
+                    } else {
+                        setSelectedIdeaId(idea.id);
+                        setMode('idea-detail');
+                    }
+                }
+            }
+            if (viewPayload.createIdea) {
+                setShowCreateIdeaModal(true);
+            }
+            // Clear payload after consuming
+            if (setViewPayload) setViewPayload(null);
+        }, [viewPayload]);
 
         // === Type/Status styling constants ===
         const TYPE_STYLES = {
