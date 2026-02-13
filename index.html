@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Command Center</title>
-    <meta name="version" content="8.61.1">
+    <meta name="version" content="8.62.0">
     <meta name="gs-app-id" content="command-center">
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -2630,7 +2630,7 @@
             const instructions = isPlanned
                 ? '1. **Correctness** — Does the implementation match the task?\n2. **Rule compliance** — Were all RULEs followed?\n3. **Side effects** — Could changes break anything?\n4. **ODRC alignment** — Are claimed resolutions accurate?\n5. **Completeness** — Is the task fully done?'
                 : '1. **Match to existing OPENs** — Does this resolve any?\n2. **Categorize** — What type of work? (UX fix, performance, bug fix, feature, refactor)\n3. **New OPENs** — Any new questions or gaps?';
-            return `${header}\n\n*Static fallback — Claude API call failed during assembly.*\n\n## Instructions\n\n${instructions}\n\n## ODRC Update Format\n\n\`\`\`\n## ODRC Updates\n- RESOLVE OPEN: "description" → matched to concept_id {id}\n- NEW OPEN: "description" → tag to Idea {name}\n- NEW DECISION: "description"\n\`\`\``;
+            return `${header}\n\n*Static fallback — Claude API call failed during assembly.*\n\n## Instructions\n\n${instructions}\n\n## ODRC Update Format\n\n\`\`\`\n## ODRC Updates\n- RESOLVE OPEN: "description" → resolution explanation\n- NEW OPEN: "description" → tag to Idea {name}\n- NEW DECISION: "description"\n\`\`\``;
         }
     };
 
@@ -2832,6 +2832,14 @@
         return fileContent.substring(odrcStart);
     }
 
+    // v8.62.0 B2: Detect session type from inbound file content
+    function detectSessionType(fileContent) {
+        if (!fileContent || typeof fileContent !== 'string') return 'exploration';
+        if (/^# CLAUDE\.md/m.test(fileContent)) return 'claude-md';
+        if (/^## Task Summary/m.test(fileContent) && /^## What to Build/m.test(fileContent)) return 'spec';
+        return 'exploration';
+    }
+
     // Duplicate detection — compare new item against existing concepts
     // Returns array of { existingConcept, overlapPercent } for potential matches
     function findDuplicateConcepts(newDescription, existingConcepts) {
@@ -2858,7 +2866,7 @@
     }
 
     // Execute ODRC import — write concepts, generate summary, add session log entry
-    async function executeODRCImport(uid, linkedIdea, checkedItems, globalIdeas, github, app) {
+    async function executeODRCImport(uid, linkedIdea, checkedItems, globalIdeas, github, app, sessionType) {
         // 1. Execute concept updates via ODRCUpdateIngestionService.execute()
         // Set ideaOrigin on each new concept to linkedIdea.id
         const updatesForExecution = checkedItems.map(item => ({
@@ -2897,7 +2905,8 @@
             docPath,
             summary,
             conceptsCreated: created,
-            conceptsResolved: resolved
+            conceptsResolved: resolved,
+            type: sessionType || 'exploration'
         });
 
         // 4. Return results for display
@@ -3606,7 +3615,9 @@ Frame everything in ODRC terms. The brief should make it easy for Chat to pick u
             }
 
             brief += `## Current ODRC State\n\n`;
-            brief += odrcState + '\n\n';
+            // v8.62.0 A3: Strip generic scope header from ODRC summary
+            const odrcStateClean = odrcState.replace(/^# ODRC State Summary\nScope:.*\n/m, '');
+            brief += odrcStateClean + '\n\n';
             brief += `## Expected Output Format\n\n`;
             brief += `At the end of this session, produce structured ODRC updates using this format:\n\n`;
             brief += `\`\`\`\n`;
@@ -3616,10 +3627,13 @@ Frame everything in ODRC terms. The brief should make it easy for Chat to pick u
             brief += `# App: ${appId}\n\n`;
             brief += `- NEW DECISION: "description"\n`;
             brief += `- NEW OPEN: "description"\n`;
-            brief += `- RESOLVE OPEN: "description" → matched to concept_id {id}\n`;
+            brief += `- RESOLVE OPEN: "description" → resolution explanation\n`;
             brief += `\`\`\`\n\n`;
-            brief += `## Supporting Documents\n`;
-            brief += `Check the zip package for additional files included with this brief.\n`;
+            // v8.62.0 A3: Only include Supporting Documents if zip will be the output method
+            if (ideaContext.sessionCount > 0 || brief.length >= 8000) {
+                brief += `## Supporting Documents\n`;
+                brief += `Check the zip package for additional files included with this brief.\n`;
+            }
 
             return brief;
         },
@@ -5807,12 +5821,13 @@ Frame all exploration using the ODRC model (OPENs, Decisions, Rules, Constraints
         },
 
         // Add session log entry — call after ODRC import
-        async addSessionLogEntry(uid, ideaId, { sessionId, date, docPath, summary, conceptsCreated, conceptsResolved }) {
+        // v8.62.0 B2: Added type field for session type tracking
+        async addSessionLogEntry(uid, ideaId, { sessionId, date, docPath, summary, conceptsCreated, conceptsResolved, type }) {
             const snapshot = await this._ref(uid).child(ideaId).once('value');
             const idea = snapshot.val();
             if (!idea) throw new Error(`Idea not found: ${ideaId}`);
             const sessionLog = idea.sessionLog || [];
-            sessionLog.push({ sessionId, date, docPath, summary, conceptsCreated, conceptsResolved });
+            sessionLog.push({ sessionId, date, docPath, summary, conceptsCreated, conceptsResolved, type: type || 'exploration' });
             await this._ref(uid).child(ideaId).update({
                 sessionLog,
                 lastSessionDate: date,
@@ -6359,6 +6374,19 @@ Frame all exploration using the ODRC model (OPENs, Decisions, Rules, Constraints
         // (multi-app zip state managed in DashboardView)
         const [pendingSessionReturn, setPendingSessionReturn] = React.useState(null); // SESSION_RETURN.json auto-review (Phase B)
         const [pendingOdrcImport, setPendingOdrcImport] = React.useState(null); // ODRC Updates from Chat session (Phase 3)
+        // v8.62.0 A6: Non-blocking notification banners (replaces modal dialogs for background detection)
+        const [notifications, setNotifications] = React.useState([]);
+        const addNotification = React.useCallback((notification) => {
+            const id = Date.now();
+            setNotifications(prev => [...prev, { id, ...notification }]);
+            // Auto-dismiss after 30 seconds
+            setTimeout(() => {
+                setNotifications(prev => prev.filter(n => n.id !== id));
+            }, 30000);
+        }, []);
+        const dismissNotification = React.useCallback((id) => {
+            setNotifications(prev => prev.filter(n => n.id !== id));
+        }, []);
         const [githubToken, setGithubToken] = React.useState(() => {
             try { return localStorage.getItem('cc_token') || ''; } catch { return ''; }
         });
@@ -6805,25 +6833,24 @@ Frame all exploration using the ODRC model (OPENs, Decisions, Rules, Constraints
                         } catch (e) { console.warn('[CC] Orphan poll error for', repo, e.message); }
                     }
                 }
+                // v8.62.0 A6: Non-blocking notification banners instead of modal dialogs
                 if (allNewJobs.length > 0) {
                     const repoNames = [...new Set(allNewJobs.map(j => j.repoFullName?.split('/').pop()))].join(', ');
-                    const confirmed = await showConfirm(
-                        `Found ${allNewJobs.length} new completion file${allNewJobs.length !== 1 ? 's' : ''} in ${repoNames}.\n\nReview them now?`,
-                        '📦 New Completed Work Detected'
-                    );
-                    if (confirmed) {
-                        setView('jobHistory');
-                    }
+                    addNotification({
+                        icon: '📦',
+                        title: `${allNewJobs.length} new completion file${allNewJobs.length !== 1 ? 's' : ''}`,
+                        message: `Found in ${repoNames}`,
+                        action: { label: 'Review', handler: () => { setView('jobHistory'); } }
+                    });
                 }
                 if (allNewOrphans.length > 0) {
                     const repoNames = [...new Set(allNewOrphans.map(o => o.repoFullName?.split('/').pop()))].join(', ');
-                    const confirmed = await showConfirm(
-                        `Found ${allNewOrphans.length} commit${allNewOrphans.length !== 1 ? 's' : ''} in ${repoNames} with no completion file.\n\nView them?`,
-                        '📍 Orphaned Commits Detected'
-                    );
-                    if (confirmed) {
-                        setView('jobHistory');
-                    }
+                    addNotification({
+                        icon: '📍',
+                        title: `${allNewOrphans.length} orphaned commit${allNewOrphans.length !== 1 ? 's' : ''}`,
+                        message: `In ${repoNames} — no completion file`,
+                        action: { label: 'View', handler: () => { setView('jobHistory'); } }
+                    });
                 }
                 // Reset so next navigation triggers another poll
                 setTimeout(() => { completionPollRef.current = false; }, 60000);
@@ -9085,7 +9112,32 @@ Frame all exploration using the ODRC model (OPENs, Decisions, Rules, Constraints
                         </div>
                     </div>
                 </header>
-                
+
+                {/* v8.62.0 A6: Non-blocking notification stack */}
+                {notifications.length > 0 && (
+                    <div className="fixed top-16 right-4 z-40 flex flex-col gap-2" style={{ maxWidth: '320px' }}>
+                        {notifications.map((n, idx) => (
+                            <div key={n.id} className="bg-slate-800 border border-slate-600 rounded-lg p-3 shadow-lg animate-pulse-once"
+                                style={{ animation: 'fadeIn 0.3s ease-out' }}>
+                                <div className="flex items-start justify-between gap-2">
+                                    <div className="flex-1 min-w-0">
+                                        <div className="text-sm font-medium text-slate-200">{n.icon} {n.title}</div>
+                                        <p className="text-xs text-slate-400 mt-1">{n.message}</p>
+                                    </div>
+                                    <button onClick={() => dismissNotification(n.id)}
+                                        className="text-slate-500 hover:text-slate-300 text-sm flex-shrink-0">✕</button>
+                                </div>
+                                {n.action && (
+                                    <button onClick={() => { n.action.handler(); dismissNotification(n.id); }}
+                                        className="mt-2 px-3 py-1 text-xs bg-indigo-600 hover:bg-indigo-500 rounded font-medium">
+                                        {n.action.label}
+                                    </button>
+                                )}
+                            </div>
+                        ))}
+                    </div>
+                )}
+
                 <main className="max-w-6xl mx-auto px-4 py-6">
                     {!githubToken && (
                         <div className="mb-6 p-4 bg-amber-900/50 border border-amber-700 rounded-lg">
@@ -12254,6 +12306,17 @@ Frame all exploration using the ODRC model (OPENs, Decisions, Rules, Constraints
                         const [importing, setImporting] = React.useState(false);
                         const [results, setResults] = React.useState(null);
                         const [pushingDoc, setPushingDoc] = React.useState(false);
+                        // v8.62.0 A7: Inline idea creation state
+                        const [showInlineCreate, setShowInlineCreate] = React.useState(false);
+                        const [newIdeaName, setNewIdeaName] = React.useState(() => {
+                            // Pre-fill from metadata slug: kebab-case → Title Case
+                            const slug = pendingOdrcImport.metadata?.ideaSlug;
+                            if (slug) return slug.split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+                            return '';
+                        });
+                        const [newIdeaDescription, setNewIdeaDescription] = React.useState('');
+                        const [newIdeaAppId, setNewIdeaAppId] = React.useState(pendingOdrcImport.metadata?.appId || '');
+                        const [creatingIdea, setCreatingIdea] = React.useState(false);
 
                         const linkedIdea = (globalIdeas || []).find(i => i.id === linkedIdeaId);
                         const activeIdeas = (globalIdeas || []).filter(i => i.status === 'active');
@@ -12311,8 +12374,10 @@ Frame all exploration using the ODRC model (OPENs, Decisions, Rules, Constraints
                             setImporting(true);
                             try {
                                 const selected = checkedItems.filter(i => i.checked);
+                                // v8.62.0 B2: Detect session type from full content
+                                const sessionType = pendingOdrcImport.fullContent ? detectSessionType(pendingOdrcImport.fullContent) : 'exploration';
                                 const importResults = await executeODRCImport(
-                                    firebaseUid, linkedIdea, selected, globalIdeas || [], github, linkedIdea.appId ? apps[linkedIdea.appId] : null
+                                    firebaseUid, linkedIdea, selected, globalIdeas || [], github, linkedIdea.appId ? apps[linkedIdea.appId] : null, sessionType
                                 );
 
                                 // Dual-track: push full doc to repo if it has full content
@@ -12388,11 +12453,20 @@ Frame all exploration using the ODRC model (OPENs, Decisions, Rules, Constraints
                                         <button onClick={close} className="text-slate-400 hover:text-white text-xl">✕</button>
                                     </div>
 
-                                    {/* Idea Picker */}
+                                    {/* Idea Picker — v8.62.0 A7: includes Create New Idea option */}
                                     <div className="px-4 pt-3 pb-2 border-b border-slate-700/50">
                                         <div className="flex items-center gap-2">
                                             <span className="text-sm text-slate-400">Linked Idea:</span>
-                                            <select value={linkedIdeaId || ''} onChange={e => setLinkedIdeaId(e.target.value || null)}
+                                            <select value={linkedIdeaId || (showInlineCreate ? '__create__' : '')}
+                                                onChange={e => {
+                                                    if (e.target.value === '__create__') {
+                                                        setShowInlineCreate(true);
+                                                        setLinkedIdeaId(null);
+                                                    } else {
+                                                        setShowInlineCreate(false);
+                                                        setLinkedIdeaId(e.target.value || null);
+                                                    }
+                                                }}
                                                 className="bg-slate-700 border border-slate-600 rounded px-2 py-1 text-sm flex-1">
                                                 <option value="">— Select Idea —</option>
                                                 {Object.entries(ideasByApp).map(([appName, ideas]) => (
@@ -12400,8 +12474,57 @@ Frame all exploration using the ODRC model (OPENs, Decisions, Rules, Constraints
                                                         {ideas.map(i => <option key={i.id} value={i.id}>{i.name} {i.slug ? `(${i.slug})` : ''}</option>)}
                                                     </optgroup>
                                                 ))}
+                                                <option value="__create__">+ Create New Idea...</option>
                                             </select>
                                         </div>
+                                        {/* Inline Create Idea form */}
+                                        {showInlineCreate && (
+                                            <div className="mt-2 bg-slate-700/50 border border-slate-600 rounded-lg p-3 space-y-2">
+                                                <input value={newIdeaName} onChange={e => setNewIdeaName(e.target.value)}
+                                                    className="w-full bg-slate-800 border border-slate-600 rounded px-2 py-1.5 text-sm"
+                                                    placeholder="Idea name (short title)" autoFocus />
+                                                <textarea value={newIdeaDescription} onChange={e => setNewIdeaDescription(e.target.value)}
+                                                    rows={2} className="w-full bg-slate-800 border border-slate-600 rounded px-2 py-1.5 text-sm resize-y"
+                                                    placeholder="Description (optional)" />
+                                                <select value={newIdeaAppId} onChange={e => setNewIdeaAppId(e.target.value)}
+                                                    className="w-full bg-slate-800 border border-slate-600 rounded px-2 py-1.5 text-sm">
+                                                    <option value="">— App (optional) —</option>
+                                                    {configuredApps.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+                                                </select>
+                                                <div className="flex gap-2 justify-end">
+                                                    <button onClick={() => setShowInlineCreate(false)}
+                                                        className="px-3 py-1 text-xs bg-slate-700 hover:bg-slate-600 rounded">Cancel</button>
+                                                    <button disabled={creatingIdea || !newIdeaName.trim()}
+                                                        onClick={async () => {
+                                                            setCreatingIdea(true);
+                                                            try {
+                                                                const appId = newIdeaAppId || null;
+                                                                const parentIdeas = appId ? (globalIdeas || []).filter(i => i.appId === appId) : [];
+                                                                const parentIdeaId = parentIdeas.length > 0 ? parentIdeas[parentIdeas.length - 1].id : null;
+                                                                const newIdea = await IdeaManager.create(firebaseUid, {
+                                                                    name: newIdeaName.trim(),
+                                                                    description: newIdeaDescription.trim(),
+                                                                    type: parentIdeaId ? 'addon' : 'base',
+                                                                    appId, parentIdeaId
+                                                                });
+                                                                // newIdea might be undefined since create() may not return the ID;
+                                                                // wait for listener to pick up the new idea
+                                                                setTimeout(() => {
+                                                                    const found = (globalIdeas || []).find(i => i.name === newIdeaName.trim() && i.status === 'active');
+                                                                    if (found) setLinkedIdeaId(found.id);
+                                                                    setShowInlineCreate(false);
+                                                                }, 1500);
+                                                            } catch (e) {
+                                                                await showAlert(`Error: ${e.message}`, '❌ Error');
+                                                            }
+                                                            setCreatingIdea(false);
+                                                        }}
+                                                        className="px-3 py-1 text-xs bg-indigo-600 hover:bg-indigo-500 rounded font-medium disabled:opacity-50">
+                                                        {creatingIdea ? '⏳ Creating...' : 'Create & Link'}
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        )}
                                     </div>
 
                                     {/* Checklist */}
@@ -17614,6 +17737,7 @@ When complete, note: "Completes ${item.id}" in deploy notes.`;
         const [showTransitionModal, setShowTransitionModal] = React.useState(null); // null | { concept, targetType }
         const [showGenerateModal, setShowGenerateModal] = React.useState(false);
         const [showExploreModal, setShowExploreModal] = React.useState(null); // null | { ideaId }
+        const [showCreateIdeaModal, setShowCreateIdeaModal] = React.useState(false); // v8.62.0: two-field idea creation
         const [sessionHistoryExpanded, setSessionHistoryExpanded] = React.useState(false);
         const [typeFilter, setTypeFilter] = React.useState('all');
         const [statusFilter, setStatusFilter] = React.useState('active');
@@ -17712,23 +17836,8 @@ When complete, note: "Completes ${item.id}" in deploy notes.`;
             } catch (e) { await showAlert(`Error: ${e.message}`, '❌ Error'); }
         };
 
-        const createIdea = async () => {
-            const name = await showPrompt('Idea name:', '', '💡 New Idea');
-            if (!name) return;
-            const description = await showPrompt('Description (optional):', '', '💡 New Idea');
-            const appId = mode === 'app-aggregate' ? selectedAppId : null;
-            const parentIdeas = appId ? appIdeas : [];
-            const parentIdeaId = parentIdeas.length > 0 ? parentIdeas[parentIdeas.length - 1].id : null;
-            try {
-                await IdeaManager.create(firebaseUid, {
-                    name, description: description || '',
-                    type: parentIdeaId ? 'addon' : 'base',
-                    appId, parentIdeaId
-                });
-                await showAlert('Idea created', '✅ Success');
-                console.log('[CC] Created idea:', name);
-            } catch (e) { await showAlert(`Error: ${e.message}`, '❌ Error'); }
-        };
+        // v8.62.0: Opens the two-field Create Idea modal instead of sequential prompts
+        const createIdea = () => setShowCreateIdeaModal(true);
 
         const graduateIdea = async (ideaId) => {
             if (!selectedAppId) {
@@ -17750,6 +17859,92 @@ When complete, note: "Completes ${item.id}" in deploy notes.`;
                 await IdeaManager.archive(firebaseUid, ideaId);
                 await showAlert('Idea archived', '✅ Archived');
             } catch (e) { await showAlert(`Error: ${e.message}`, '❌ Error'); }
+        };
+
+        // === CreateIdeaModal (v8.62.0 — A2: Separate name/description) ===
+        const CreateIdeaModal = ({ onClose }) => {
+            const [ideaName, setIdeaName] = React.useState('');
+            const [ideaDescription, setIdeaDescription] = React.useState('');
+            const [creating, setCreating] = React.useState(false);
+            const NAME_MAX = 80;
+            const nameLen = ideaName.length;
+
+            const handleCreate = async () => {
+                if (!ideaName.trim()) return;
+                setCreating(true);
+                const appId = mode === 'app-aggregate' ? selectedAppId : null;
+                const parentIdeas = appId ? appIdeas : [];
+                const parentIdeaId = parentIdeas.length > 0 ? parentIdeas[parentIdeas.length - 1].id : null;
+                try {
+                    await IdeaManager.create(firebaseUid, {
+                        name: ideaName.trim(),
+                        description: ideaDescription.trim(),
+                        type: parentIdeaId ? 'addon' : 'base',
+                        appId, parentIdeaId
+                    });
+                    await showAlert('Idea created', '✅ Success');
+                    console.log('[CC] Created idea:', ideaName.trim());
+                    onClose();
+                } catch (e) {
+                    await showAlert(`Error: ${e.message}`, '❌ Error');
+                }
+                setCreating(false);
+            };
+
+            return (
+                <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4" onClick={onClose}>
+                    <div className="bg-slate-800 rounded-xl border border-slate-700 w-full max-w-md p-6" onClick={e => e.stopPropagation()}>
+                        <h2 className="text-lg font-bold mb-4">💡 New Idea</h2>
+
+                        <div className="mb-4">
+                            <label className="text-xs text-slate-400 block mb-1">
+                                Name <span className="text-slate-500">(short title)</span>
+                            </label>
+                            <input value={ideaName} onChange={e => setIdeaName(e.target.value)}
+                                maxLength={NAME_MAX + 10}
+                                className="w-full bg-slate-700 border border-slate-600 rounded px-3 py-2 text-sm"
+                                placeholder="e.g. Smart Intake for ODRC Concepts"
+                                autoFocus />
+                            <div className="flex justify-between mt-1">
+                                {nameLen > 60 && (
+                                    <span className="text-xs text-amber-400">Consider moving details to Description</span>
+                                )}
+                                {nameLen <= 60 && <span />}
+                                <span className={`text-xs ${
+                                    nameLen > NAME_MAX ? 'text-red-400' :
+                                    nameLen > 60 ? 'text-amber-400' :
+                                    'text-slate-500'
+                                }`}>{NAME_MAX - nameLen}</span>
+                            </div>
+                        </div>
+
+                        <div className="mb-4">
+                            <label className="text-xs text-slate-400 block mb-1">
+                                Description <span className="text-slate-500">(optional — what this idea is about)</span>
+                            </label>
+                            <textarea value={ideaDescription} onChange={e => setIdeaDescription(e.target.value)}
+                                rows={4}
+                                className="w-full bg-slate-700 border border-slate-600 rounded px-3 py-2 text-sm resize-y"
+                                placeholder="Detailed description of the idea, goals, context..." />
+                        </div>
+
+                        {mode === 'app-aggregate' && selectedAppId && (
+                            <div className="text-xs text-slate-400 mb-4 bg-slate-700/50 rounded px-3 py-2">
+                                Will be linked to: <span className="text-slate-300 font-medium">{apps[selectedAppId]?.name || selectedAppId}</span>
+                                {appIdeas.length > 0 && <span> (add-on to idea #{appIdeas.length})</span>}
+                            </div>
+                        )}
+
+                        <div className="flex gap-2 justify-end">
+                            <button onClick={onClose} className="px-4 py-2 rounded text-sm bg-slate-700 hover:bg-slate-600">Cancel</button>
+                            <button onClick={handleCreate} disabled={creating || !ideaName.trim() || nameLen > NAME_MAX}
+                                className="px-4 py-2 rounded text-sm bg-indigo-600 hover:bg-indigo-500 font-medium disabled:opacity-50">
+                                {creating ? '⏳ Creating...' : 'Create Idea'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            );
         };
 
         // === Navigation helpers ===
@@ -18149,7 +18344,7 @@ When complete, note: "Completes ${item.id}" in deploy notes.`;
                 <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4" onClick={onClose}>
                     <div className="bg-slate-800 rounded-xl border border-slate-700 w-full max-w-3xl max-h-[85vh] flex flex-col" onClick={e => e.stopPropagation()}>
                         <div className="flex items-center justify-between p-4 border-b border-slate-700">
-                            <h2 className="text-lg font-bold">🗣️ Explore in Chat — {idea.name} (Session {sessionNum})</h2>
+                            <h2 className="text-lg font-bold">🗣️ Explore in Chat — {idea.name.substring(0, 50)}{idea.name.length > 50 ? '…' : ''} (Session {sessionNum})</h2>
                             <button onClick={onClose} className="text-slate-400 hover:text-white text-xl">✕</button>
                         </div>
                         <div className="flex-1 overflow-y-auto p-4">
@@ -18317,28 +18512,55 @@ When complete, note: "Completes ${item.id}" in deploy notes.`;
                             </select>
                         </div>
 
-                        {/* Apps with concepts */}
-                        {configuredApps.length > 0 && (
-                            <div className="mb-6">
-                                <h2 className="text-sm font-medium text-slate-400 mb-2">Apps</h2>
-                                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                                    {configuredApps.map(app => {
-                                        const appIdeaIds = globalIdeas.filter(i => i.appId === app.id).map(i => i.id);
-                                        const count = globalConcepts.filter(c => appIdeaIds.includes(c.ideaOrigin) && c.status === 'active').length;
-                                        return (
-                                            <button key={app.id} onClick={() => navigateToApp(app.id)}
-                                                className="bg-slate-800 border border-slate-700 rounded-lg p-3 text-left hover:border-indigo-600 transition-colors">
-                                                <div className="font-medium text-sm">{app.name}</div>
-                                                <div className="text-xs text-slate-400 mt-1">
-                                                    {count > 0 ? `${count} active concept${count !== 1 ? 's' : ''}` : 'No concepts'}
-                                                    {' · '}{appIdeaIds.length > 0 ? `${globalIdeas.filter(i => i.appId === app.id).length} idea${globalIdeas.filter(i => i.appId === app.id).length !== 1 ? 's' : ''}` : 'No ideas'}
-                                                </div>
-                                            </button>
-                                        );
-                                    })}
+                        {/* Apps with concepts — v8.62.0 A4: sort active first, collapse empties */}
+                        {configuredApps.length > 0 && (() => {
+                            const appsWithContent = configuredApps.filter(app => {
+                                const hasIdeas = globalIdeas.some(i => i.appId === app.id);
+                                const appIdeaIds = globalIdeas.filter(i => i.appId === app.id).map(i => i.id);
+                                const hasConcepts = globalConcepts.some(c => appIdeaIds.includes(c.ideaOrigin) && c.status === 'active');
+                                return hasIdeas || hasConcepts;
+                            });
+                            const emptyApps = configuredApps.filter(app => !appsWithContent.includes(app));
+
+                            return (
+                                <div className="mb-6">
+                                    <h2 className="text-sm font-medium text-slate-400 mb-2">Apps</h2>
+                                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                                        {appsWithContent.map(app => {
+                                            const appIdeaIds = globalIdeas.filter(i => i.appId === app.id).map(i => i.id);
+                                            const count = globalConcepts.filter(c => appIdeaIds.includes(c.ideaOrigin) && c.status === 'active').length;
+                                            const ideaCount = globalIdeas.filter(i => i.appId === app.id).length;
+                                            return (
+                                                <button key={app.id} onClick={() => navigateToApp(app.id)}
+                                                    className="bg-slate-800 border border-slate-700 rounded-lg p-3 text-left hover:border-indigo-600 transition-colors">
+                                                    <div className="font-medium text-sm">{app.name}</div>
+                                                    <div className="text-xs text-slate-400 mt-1">
+                                                        {count > 0 ? `${count} active concept${count !== 1 ? 's' : ''}` : 'No concepts'}
+                                                        {' · '}{ideaCount > 0 ? `${ideaCount} idea${ideaCount !== 1 ? 's' : ''}` : 'No ideas'}
+                                                    </div>
+                                                </button>
+                                            );
+                                        })}
+                                    </div>
+                                    {emptyApps.length > 0 && (
+                                        <details className="mt-2">
+                                            <summary className="text-xs text-slate-500 cursor-pointer hover:text-slate-400">
+                                                {emptyApps.length} app{emptyApps.length !== 1 ? 's' : ''} with no active concepts
+                                            </summary>
+                                            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 mt-2">
+                                                {emptyApps.map(app => (
+                                                    <button key={app.id} onClick={() => navigateToApp(app.id)}
+                                                        className="bg-slate-800/50 border border-slate-700/50 rounded-lg p-3 text-left hover:border-indigo-600 transition-colors opacity-60">
+                                                        <div className="font-medium text-sm text-slate-400">{app.name}</div>
+                                                        <div className="text-xs text-slate-500 mt-1">No concepts · No ideas</div>
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        </details>
+                                    )}
                                 </div>
-                            </div>
-                        )}
+                            );
+                        })()}
 
                         {/* Concepts grouped by type */}
                         {filteredConcepts.length === 0 ? (
@@ -18383,20 +18605,30 @@ When complete, note: "Completes ${item.id}" in deploy notes.`;
                                         const ideaCpts = globalConcepts.filter(c => c.ideaOrigin === idea.id);
                                         const phase = idea.phase || computeIdeaPhase(ideaCpts);
                                         return (
-                                            <button key={idea.id} onClick={() => navigateToIdea(idea.id)}
-                                                className={`px-3 py-1.5 rounded-lg text-sm border transition-colors ${
-                                                    idea.status === 'active' ? 'border-indigo-600 bg-indigo-900/30 text-indigo-300' :
-                                                    idea.status === 'graduated' ? 'border-green-700 bg-green-900/20 text-green-400' :
-                                                    'border-slate-700 bg-slate-800 text-slate-400'
-                                                }`}>
-                                                <span className="font-medium">{idx + 1}.</span> {idea.name}
-                                                <span className="text-xs ml-1 opacity-60">({idea.status})</span>
-                                                <span className={`ml-1 px-1 py-0.5 rounded text-[10px] ${
-                                                    phase === 'exploring' ? 'bg-blue-900/50 text-blue-300' :
-                                                    phase === 'converging' ? 'bg-amber-900/50 text-amber-300' :
-                                                    'bg-green-900/50 text-green-300'
-                                                }`}>{phase}</span>
-                                            </button>
+                                            <div key={idea.id} className="flex items-center gap-1">
+                                                <button onClick={() => navigateToIdea(idea.id)}
+                                                    className={`px-3 py-1.5 rounded-lg text-sm border transition-colors hover:brightness-110 ${
+                                                        idea.status === 'active' ? 'border-indigo-600 bg-indigo-900/30 text-indigo-300' :
+                                                        idea.status === 'graduated' ? 'border-green-700 bg-green-900/20 text-green-400' :
+                                                        'border-slate-700 bg-slate-800 text-slate-400'
+                                                    }`}
+                                                    title="Click to view idea details">
+                                                    <span className="font-medium">{idx + 1}.</span> {idea.name.substring(0, 40)}{idea.name.length > 40 ? '…' : ''}
+                                                    <span className="text-xs ml-1 opacity-60">({idea.status})</span>
+                                                    <span className={`ml-1 px-1 py-0.5 rounded text-[10px] ${
+                                                        phase === 'exploring' ? 'bg-blue-900/50 text-blue-300' :
+                                                        phase === 'converging' ? 'bg-amber-900/50 text-amber-300' :
+                                                        'bg-green-900/50 text-green-300'
+                                                    }`}>{phase}</span>
+                                                </button>
+                                                {idea.status === 'active' && (
+                                                    <button onClick={() => setShowExploreModal({ ideaId: idea.id })}
+                                                        className="px-2 py-1.5 rounded text-sm bg-purple-700 hover:bg-purple-600 transition-colors"
+                                                        title="Explore in Chat">
+                                                        🗣️
+                                                    </button>
+                                                )}
+                                            </div>
                                         );
                                     })}
                                 </div>
@@ -18543,6 +18775,9 @@ When complete, note: "Completes ${item.id}" in deploy notes.`;
                     const exploreIdea = globalIdeas.find(i => i.id === showExploreModal.ideaId);
                     return exploreIdea ? <ExploreInChatModal idea={exploreIdea} onClose={() => setShowExploreModal(null)} /> : null;
                 })()}
+                {showCreateIdeaModal && (
+                    <CreateIdeaModal onClose={() => setShowCreateIdeaModal(false)} />
+                )}
             </div>
         );
     }
