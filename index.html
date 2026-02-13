@@ -1077,9 +1077,36 @@
             if (bytes < 1024) return bytes + ' B';
             if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
             return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
+        },
+
+        // Auto-cleanup on app load — runs once per session if usage exceeds threshold
+        autoCleanup() {
+            try {
+                const { total, percent } = this.getUsage();
+                const pct = parseFloat(percent);
+                if (pct >= this.CLEANUP_THRESHOLD * 100) {
+                    console.log(`[StorageManager] Auto-cleanup: usage at ${percent}% (threshold: ${this.CLEANUP_THRESHOLD * 100}%), running cleanup...`);
+                    const result = this.cleanup(false);
+                    // If still above target after normal cleanup, go aggressive
+                    const after = this.getUsage();
+                    if (parseFloat(after.percent) >= this.CLEANUP_THRESHOLD * 100) {
+                        console.log(`[StorageManager] Still at ${after.percent}% after normal cleanup, running aggressive...`);
+                        this.cleanup(true);
+                    }
+                    return result;
+                } else {
+                    console.log(`[StorageManager] Storage healthy: ${this._formatBytes(total)} (${percent}%)`);
+                }
+            } catch (e) {
+                console.warn('[StorageManager] Auto-cleanup error:', e.message);
+            }
+            return null;
         }
     };
-    
+
+    // Run storage auto-cleanup on app load
+    StorageManager.autoCleanup();
+
     // =========================================================================
     // PHASE 0.2 DATA SERVICES — Orchestrator entity services
     // =========================================================================
