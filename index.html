@@ -2943,6 +2943,80 @@
     }
 
     // =========================================================================
+    // TEMPORARY CLEANUP: Deduplicate concepts + session log for an idea
+    // Run in console: cleanupDuplicateODRC('IDEA_ID')
+    // Remove this function after successful cleanup.
+    // =========================================================================
+    window.cleanupDuplicateODRC = async function(ideaId) {
+        const uid = window.__testFirebaseUid || (firebase.auth().currentUser && firebase.auth().currentUser.uid);
+        if (!uid) { console.error('Not signed in'); return; }
+        if (!ideaId) { console.error('Usage: cleanupDuplicateODRC("ideaId")'); return; }
+
+        console.log('[CC] Cleanup: fetching concepts for idea', ideaId);
+        const allConcepts = await ConceptManager.getAll(uid);
+        const ideaConcepts = allConcepts.filter(c => c.ideaOrigin === ideaId);
+        console.log('[CC] Cleanup: found', ideaConcepts.length, 'concepts for this idea');
+
+        // Group by content (exact match)
+        const groups = {};
+        ideaConcepts.forEach(c => {
+            const key = c.content.trim();
+            if (!groups[key]) groups[key] = [];
+            groups[key].push(c);
+        });
+
+        const uniqueCount = Object.keys(groups).length;
+        const dupeCount = ideaConcepts.length - uniqueCount;
+        console.log('[CC] Cleanup:', uniqueCount, 'unique concepts,', dupeCount, 'duplicates to remove');
+
+        if (dupeCount === 0) {
+            console.log('[CC] Cleanup: no duplicates found, nothing to do');
+            return;
+        }
+
+        // For each group, keep the oldest (by createdAt), delete the rest
+        let deleted = 0;
+        for (const [content, concepts] of Object.entries(groups)) {
+            if (concepts.length <= 1) continue;
+            const sorted = concepts.sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || ''));
+            const keep = sorted[0];
+            const toDelete = sorted.slice(1);
+            console.log(`[CC] Cleanup: "${content.slice(0, 60)}..." — keeping ${keep.id}, deleting ${toDelete.length} dupes`);
+            for (const dupe of toDelete) {
+                await ConceptManager.remove(uid, dupe.id);
+                deleted++;
+            }
+        }
+        console.log('[CC] Cleanup: deleted', deleted, 'duplicate concepts');
+
+        // Clean up duplicate session log entries
+        const ideaSnap = await firebase.database().ref(`command-center/${uid}/ideas/${ideaId}`).once('value');
+        const idea = ideaSnap.val();
+        if (idea && idea.sessionLog && idea.sessionLog.length > 1) {
+            // Keep only unique session entries (by sessionId)
+            const seen = new Set();
+            const dedupedLog = idea.sessionLog.filter(entry => {
+                if (seen.has(entry.sessionId)) return false;
+                seen.add(entry.sessionId);
+                return true;
+            });
+            const removedSessions = idea.sessionLog.length - dedupedLog.length;
+            if (removedSessions > 0) {
+                await firebase.database().ref(`command-center/${uid}/ideas/${ideaId}`).update({
+                    sessionLog: dedupedLog,
+                    updatedAt: new Date().toISOString()
+                });
+                console.log('[CC] Cleanup: removed', removedSessions, 'duplicate session log entries, kept', dedupedLog.length);
+            } else {
+                console.log('[CC] Cleanup: no duplicate session log entries');
+            }
+        }
+
+        console.log('[CC] Cleanup complete! Remaining concepts:', uniqueCount);
+        return { deleted, remaining: uniqueCount };
+    };
+
+    // =========================================================================
     // SESSION TYPES + SESSION BRIEF GENERATOR (v8.25.0 — Phase 2.1)
     // =========================================================================
 
