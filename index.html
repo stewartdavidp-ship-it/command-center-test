@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Command Center</title>
-    <meta name="version" content="8.64.1">
+    <meta name="version" content="8.64.2">
     <meta name="gs-app-id" content="command-center">
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -15543,6 +15543,9 @@ When complete, note: "Completes ${item.id}" in deploy notes.`;
         const [typeFilter, setTypeFilter] = React.useState('all');
         const [statusFilter, setStatusFilter] = React.useState('active');
         const [appFilter, setAppFilter] = React.useState('all');
+        const [activeConceptTab, setActiveConceptTab] = React.useState('OPEN'); // v8.64.2: Mode 3 ODRC tabs
+        const [conceptSearchFilter, setConceptSearchFilter] = React.useState(''); // v8.64.2: cross-mode text search
+        const [conceptStatusFilter, setConceptStatusFilter] = React.useState('all'); // v8.64.2: Mode 3 status filter
 
         const configuredApps = React.useMemo(() => Object.values(apps).filter(a => a.testRepo || a.prodRepo || a.repos), [apps]);
 
@@ -15575,8 +15578,12 @@ When complete, note: "Completes ${item.id}" in deploy notes.`;
                 const ideaIds = globalIdeas.filter(i => i.appId === appFilter).map(i => i.id);
                 list = list.filter(c => ideaIds.includes(c.ideaOrigin));
             }
+            if (conceptSearchFilter) {
+                const q = conceptSearchFilter.toLowerCase();
+                list = list.filter(c => c.content.toLowerCase().includes(q));
+            }
             return list;
-        }, [globalConcepts, typeFilter, statusFilter, appFilter, globalIdeas]);
+        }, [globalConcepts, typeFilter, statusFilter, appFilter, globalIdeas, conceptSearchFilter]);
 
         const appIdeas = React.useMemo(() => {
             if (!selectedAppId) return [];
@@ -15593,6 +15600,39 @@ When complete, note: "Completes ${item.id}" in deploy notes.`;
             if (!selectedIdeaId) return [];
             return globalConcepts.filter(c => c.ideaOrigin === selectedIdeaId);
         }, [globalConcepts, selectedIdeaId]);
+
+        // v8.64.2: Filtered views for text search + status filter
+        const filteredAppConcepts = React.useMemo(() => {
+            let list = appActiveConcepts;
+            if (conceptSearchFilter) {
+                const q = conceptSearchFilter.toLowerCase();
+                list = list.filter(c => c.content.toLowerCase().includes(q));
+            }
+            return list;
+        }, [appActiveConcepts, conceptSearchFilter]);
+
+        const filteredIdeaConcepts = React.useMemo(() => {
+            let list = ideaConcepts;
+            if (conceptStatusFilter !== 'all') list = list.filter(c => c.status === conceptStatusFilter);
+            if (conceptSearchFilter) {
+                const q = conceptSearchFilter.toLowerCase();
+                list = list.filter(c => c.content.toLowerCase().includes(q));
+            }
+            return list;
+        }, [ideaConcepts, conceptStatusFilter, conceptSearchFilter]);
+
+        // v8.64.2: Auto-switch tab if OPEN has 0 items but another tab has items
+        React.useEffect(() => {
+            if (mode !== 'idea-detail' || !selectedIdeaId || filteredIdeaConcepts.length === 0) return;
+            const currentCount = filteredIdeaConcepts.filter(c => c.type === activeConceptTab).length;
+            if (currentCount === 0) {
+                const best = ODRC_TYPES.reduce((max, t) => {
+                    const count = filteredIdeaConcepts.filter(c => c.type === t).length;
+                    return count > max.count ? { type: t, count } : max;
+                }, { type: 'OPEN', count: 0 });
+                if (best.count > 0) setActiveConceptTab(best.type);
+            }
+        }, [mode, selectedIdeaId, filteredIdeaConcepts, activeConceptTab]);
 
         const stats = React.useMemo(() => ({
             total: globalConcepts.length,
@@ -15755,14 +15795,16 @@ When complete, note: "Completes ${item.id}" in deploy notes.`;
         };
 
         // === Navigation helpers ===
-        const navigateToApp = (appId) => { setSelectedAppId(appId); setSelectedIdeaId(null); setMode('app-aggregate'); };
+        const navigateToApp = (appId) => { setSelectedAppId(appId); setSelectedIdeaId(null); setConceptSearchFilter(''); setConceptStatusFilter('all'); setMode('app-aggregate'); };
         const navigateToIdea = (ideaId) => {
             setSelectedIdeaId(ideaId);
             const idea = globalIdeas.find(i => i.id === ideaId);
             if (idea?.appId && !selectedAppId) setSelectedAppId(idea.appId);
+            setConceptSearchFilter(''); setConceptStatusFilter('all'); setActiveConceptTab('OPEN');
             setMode('idea-detail');
         };
         const goBack = () => {
+            setConceptSearchFilter(''); setConceptStatusFilter('all');
             if (mode === 'idea-detail') { setMode('app-aggregate'); setSelectedIdeaId(null); }
             else if (mode === 'app-aggregate') { setMode('all'); setSelectedAppId(null); }
         };
@@ -16006,6 +16048,16 @@ When complete, note: "Completes ${item.id}" in deploy notes.`;
 
                         {/* Filter bar */}
                         <div className="flex gap-2 mb-4 flex-wrap">
+                            <div className="relative flex-1 min-w-48">
+                                <input type="text" value={conceptSearchFilter}
+                                    onChange={e => setConceptSearchFilter(e.target.value)}
+                                    placeholder="Search concepts..."
+                                    className="w-full bg-slate-700 border border-slate-600 rounded px-3 py-1 text-sm pr-7" />
+                                {conceptSearchFilter && (
+                                    <button onClick={() => setConceptSearchFilter('')}
+                                        className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200 text-sm">×</button>
+                                )}
+                            </div>
                             <select value={typeFilter} onChange={e => setTypeFilter(e.target.value)}
                                 className="bg-slate-700 border border-slate-600 rounded px-2 py-1 text-sm">
                                 <option value="all">All Types</option>
@@ -16158,7 +16210,18 @@ When complete, note: "Completes ${item.id}" in deploy notes.`;
                         ) : (
                             <div>
                                 <h2 className="text-sm font-medium text-slate-400 mb-2">Current Active State</h2>
-                                {ODRC_TYPES.map(type => renderConceptGroup(type, appActiveConcepts))}
+                                {/* v8.64.2: Text search for Mode 2 */}
+                                <div className="relative mb-3">
+                                    <input type="text" value={conceptSearchFilter}
+                                        onChange={e => setConceptSearchFilter(e.target.value)}
+                                        placeholder="Search concepts..."
+                                        className="w-full bg-slate-700 border border-slate-600 rounded px-3 py-1.5 text-sm pr-7" />
+                                    {conceptSearchFilter && (
+                                        <button onClick={() => setConceptSearchFilter('')}
+                                            className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200 text-sm">×</button>
+                                    )}
+                                </div>
+                                {ODRC_TYPES.map(type => renderConceptGroup(type, filteredAppConcepts))}
                             </div>
                         )}
                     </div>
@@ -16265,7 +16328,70 @@ When complete, note: "Completes ${item.id}" in deploy notes.`;
                             </div>
                         ) : (
                             <div>
-                                {ODRC_TYPES.map(type => renderConceptGroup(type, ideaConcepts, false))}
+                                {/* v8.64.2 T2: Concept summary bar */}
+                                <div className="text-sm text-slate-400 mb-3 flex flex-wrap gap-x-2">
+                                    <span>📊 {ideaConcepts.length} concept{ideaConcepts.length !== 1 ? 's' : ''}:</span>
+                                    {ODRC_TYPES.map(type => {
+                                        const total = ideaConcepts.filter(c => c.type === type).length;
+                                        const resolved = type === 'OPEN' ? ideaConcepts.filter(c => c.type === 'OPEN' && c.status === 'resolved').length : 0;
+                                        const style = TYPE_STYLES[type];
+                                        if (total === 0) return <span key={type} className="text-slate-600">{total} {type.toLowerCase()}s</span>;
+                                        return <span key={type}>
+                                            <span style={{color: type === 'OPEN' ? '#c084fc' : type === 'DECISION' ? '#93c5fd' : type === 'RULE' ? '#fca5a5' : '#fcd34d'}}>
+                                                {total} {type.toLowerCase()}{total !== 1 ? 's' : ''}{resolved > 0 ? ` (${resolved} resolved)` : ''}
+                                            </span>
+                                            {type !== 'CONSTRAINT' ? ' · ' : ''}
+                                        </span>;
+                                    })}
+                                </div>
+
+                                {/* v8.64.2 T5: Filter bar — text search + status filter */}
+                                <div className="flex gap-2 mb-3 flex-wrap">
+                                    <div className="relative flex-1 min-w-48">
+                                        <input type="text" value={conceptSearchFilter}
+                                            onChange={e => setConceptSearchFilter(e.target.value)}
+                                            placeholder="Search concepts..."
+                                            className="w-full bg-slate-700 border border-slate-600 rounded px-3 py-1.5 text-sm pr-7" />
+                                        {conceptSearchFilter && (
+                                            <button onClick={() => setConceptSearchFilter('')}
+                                                className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200 text-sm">×</button>
+                                        )}
+                                    </div>
+                                    <select value={conceptStatusFilter} onChange={e => setConceptStatusFilter(e.target.value)}
+                                        className="bg-slate-700 border border-slate-600 rounded px-2 py-1.5 text-sm">
+                                        <option value="all">All Statuses</option>
+                                        {CONCEPT_STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
+                                    </select>
+                                </div>
+
+                                {/* v8.64.2 T3: Tab bar */}
+                                <div className="flex gap-1 border-b border-slate-700 mb-3">
+                                    {ODRC_TYPES.map(type => {
+                                        const count = filteredIdeaConcepts.filter(c => c.type === type).length;
+                                        const style = TYPE_STYLES[type];
+                                        return (
+                                            <button key={type}
+                                                onClick={() => setActiveConceptTab(type)}
+                                                className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+                                                    activeConceptTab === type
+                                                        ? 'border-indigo-400 text-white'
+                                                        : count > 0
+                                                            ? 'border-transparent text-slate-400 hover:text-slate-200'
+                                                            : 'border-transparent text-slate-600'
+                                                }`}>
+                                                <span>{style.icon}</span> {type}s
+                                                <span className="ml-1.5 px-1.5 py-0.5 bg-slate-700 rounded text-xs">{count}</span>
+                                            </button>
+                                        );
+                                    })}
+                                </div>
+
+                                {/* v8.64.2 T4: Tab panel */}
+                                {renderConceptGroup(activeConceptTab, filteredIdeaConcepts, false) || (
+                                    <div className="text-center py-8 text-slate-500">
+                                        No {activeConceptTab.toLowerCase()}s {conceptSearchFilter || conceptStatusFilter !== 'all' ? 'match filters' : 'in this idea'}
+                                    </div>
+                                )}
                             </div>
                         )}
                     </div>
