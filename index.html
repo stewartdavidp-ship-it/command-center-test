@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Command Center</title>
-    <meta name="version" content="8.63.3">
+    <meta name="version" content="8.63.4">
     <meta name="gs-app-id" content="command-center">
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -3071,12 +3071,16 @@ Generate a markdown document with these sections:
 - Idea Summary — what this idea is about
 - Prior Session Summary — if sessions exist, summarize the most recent
 - Current ODRC State — all active concepts grouped by type (OPEN, DECISION, RULE, CONSTRAINT)
-- Expected Output Format — the ODRC Updates format with header metadata block:
-  ## ODRC Updates
-  # Idea: {idea-slug}
-  # Session: {session-number}
-  # App: {app-id}
-  Followed by lines using: NEW DECISION/OPEN/RULE/CONSTRAINT and RESOLVE OPEN formats
+- Expected Output Format — provide the COMPLETE output specification including:
+  (a) Header block with all six metadata lines: title with idea display name, date (YYYY-MM-DD), session number with short description, idea slug, app ID, and a one-line context summary of what the session should accomplish
+  (b) ODRC Updates section showing all five line types with examples that demonstrate substantive descriptions with rationale:
+      - RESOLVE OPEN: "original open text" → resolution with rationale
+      - NEW DECISION: "what was decided AND why — enough context to understand the decision standalone"
+      - NEW OPEN: "specific actionable question — not vague"
+      - NEW RULE: "behavioral principle governing future work"
+      - NEW CONSTRAINT: "hard boundary — technology, scope, policy"
+  (c) Session Notes section with three subsections: What Was Accomplished (narrative paragraph), Key Design Principles Established (bulleted themes that emerged), Session Status (concept counts by type, phase assessment, what the next session should focus on)
+  Show the complete format as a copyable template the developer can reference during the session.
 - Supporting Documents — note what else is in the zip
 
 Frame everything in ODRC terms. The brief should make it easy for Chat to pick up context and produce structured ODRC output at session end.`;
@@ -3226,15 +3230,29 @@ Frame everything in ODRC terms. The brief should make it easy for Chat to pick u
             const odrcStateClean = odrcState.replace(/^# ODRC State Summary\nScope:.*\n/m, '');
             brief += odrcStateClean + '\n\n';
             brief += `## Expected Output Format\n\n`;
-            brief += `At the end of this session, produce structured ODRC updates using this format:\n\n`;
+            brief += `At the end of this session, produce structured ODRC updates using the format below.\n`;
+            brief += `Each ODRC line should include substantive rationale — not just a label.\n\n`;
             brief += `\`\`\`\n`;
-            brief += `## ODRC Updates\n`;
+            brief += `# ODRC Updates — ${ideaContext.name}\n`;
+            brief += `# Date: ${new Date().toISOString().slice(0, 10)}\n`;
+            brief += `# Session: S-${new Date().toISOString().slice(0, 10).replace(/-/g, '-')}-${String(sessionNum).padStart(3, '0')} (describe this session)\n`;
             brief += `# Idea: ${slug}\n`;
-            brief += `# Session: S-${new Date().toISOString().slice(0, 10).replace(/-/g, '-')}-${String(sessionNum).padStart(3, '0')}\n`;
-            brief += `# App: ${appId}\n\n`;
-            brief += `- NEW DECISION: "description"\n`;
-            brief += `- NEW OPEN: "description"\n`;
-            brief += `- RESOLVE OPEN: "description" → resolution explanation\n`;
+            brief += `# App: ${appId}\n`;
+            brief += `# Context: (one-line summary of what this session accomplished)\n\n`;
+            brief += `- RESOLVE OPEN: "original open text" → resolution with rationale\n`;
+            brief += `- NEW DECISION: "what was decided AND why — enough context to understand standalone"\n`;
+            brief += `- NEW OPEN: "specific actionable question — not vague"\n`;
+            brief += `- NEW RULE: "behavioral principle governing future work"\n`;
+            brief += `- NEW CONSTRAINT: "hard boundary — technology, scope, policy"\n\n`;
+            brief += `## Session Notes\n\n`;
+            brief += `### What Was Accomplished\n`;
+            brief += `(Narrative paragraph summarizing the session)\n\n`;
+            brief += `### Key Design Principles Established\n`;
+            brief += `- (Bulleted themes that emerged during the session)\n\n`;
+            brief += `### Session Status\n`;
+            brief += `- Concepts: X OPENs, X DECISIONs, X RULEs, X CONSTRAINTs\n`;
+            brief += `- Phase: (current assessment)\n`;
+            brief += `- Next session: (what to focus on next)\n`;
             brief += `\`\`\`\n\n`;
             // v8.62.0 A3: Only include Supporting Documents if zip will be the output method
             if (ideaContext.sessionCount > 0 || brief.length >= 8000) {
