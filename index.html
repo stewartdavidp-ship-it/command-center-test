@@ -2840,6 +2840,18 @@
         return 'exploration';
     }
 
+    // v8.62.0 B4: Detect inbound artifact type — three-path routing
+    function detectInboundArtifactType(fileContent) {
+        if (!fileContent || typeof fileContent !== 'string') return null;
+        // Check for ODRC updates (existing detection)
+        if (detectODRCContent(fileContent)) return 'odrc';
+        // Check for CLAUDE.md (has both header and spec-id)
+        if (/^# CLAUDE\.md/m.test(fileContent) && /^# cc-spec-id:/m.test(fileContent)) return 'claude-md';
+        // Check for spec document
+        if (/^## Task Summary/m.test(fileContent) && /^## What to Build/m.test(fileContent)) return 'spec';
+        return null; // Not a pipeline artifact
+    }
+
     // Duplicate detection — compare new item against existing concepts
     // Returns array of { existingConcept, overlapPercent } for potential matches
     function findDuplicateConcepts(newDescription, existingConcepts) {
@@ -3436,32 +3448,116 @@
     // =========================================================================
 
     const IdeationBriefGenerator = {
-        // v8.61.1: Phase-aware system prompt — shifts framing at spec-ready
-        getSystemPrompt(phase) {
-            if (phase === 'spec-ready') {
-                return `You are generating a session brief for a SPECIFICATION session.
-The idea has reached spec-ready status — most OPENs are resolved, decisions are locked.
-Generate a brief that instructs Chat to produce a formal specification from the accumulated ODRC state.
-The spec should consolidate all DECISIONs, RULEs, and CONSTRAINTs into an implementable document.
-Any remaining OPENs should be called out as items to resolve during the session.
+        // v8.62.0 B1: Determine session type from idea state
+        getSessionType(idea, concepts) {
+            const phase = idea.phase || computeIdeaPhase(concepts);
+            const hasSpec = (idea.sessionLog || []).some(s => s.type === 'spec');
+            if (phase === 'spec-ready' && hasSpec) return 'claude-md';
+            if (phase === 'spec-ready') return 'spec';
+            return 'exploration';
+        },
+
+        // v8.62.0 B1: Three-type system prompt — exploration, spec, claude-md
+        getSystemPrompt(sessionType) {
+            switch (sessionType) {
+                case 'spec':
+                    return `You are generating a session brief for a SPECIFICATION session.
+The idea has reached spec-ready status. Generate a brief that instructs Chat to:
+1. Review all DECISIONs, RULEs, and CONSTRAINTs
+2. Resolve any remaining OPENs
+3. Produce a formal specification document with:
+   - Task summary
+   - Detailed implementation sections
+   - Architecture constraints
+   - File structure
+   - Any phase splitting recommendations
+4. Include ODRC Updates section at the end
+
 Generate a markdown document with these sections:
 - Session header (idea name, app, session number, current version)
 - "Spec Goal" — what the specification should cover
 - Idea Summary — what this idea is about
-- Current ODRC State — all active concepts grouped by type (OPEN, DECISION, RULE, CONSTRAINT)
-- Expected Output Format — the ODRC Updates format with header metadata block:
-  ## ODRC Updates
-  # Idea: {idea-slug}
-  # Session: {session-number}
-  # App: {app-id}
-  Followed by lines using: NEW DECISION/OPEN/RULE/CONSTRAINT and RESOLVE OPEN formats
-- Supporting Documents — note what else is in the zip
+- Current ODRC State — all active concepts grouped by type
+- Expected Output Format (ODRC Updates with header metadata)
 
-Frame everything in ODRC terms. The brief should make it easy for Chat to consolidate the idea into a buildable specification with structured ODRC output at session end.`;
-            }
+The spec should be comprehensive enough that a CLAUDE.md can be generated from it.`;
 
-            // Default exploration prompt
-            return `You are generating a session brief for a structured ideation conversation.
+                case 'claude-md':
+                    return `You are generating a session brief for a CLAUDE.md GENERATION session.
+A specification already exists for this idea. Generate a brief that instructs Chat to:
+1. Review the specification
+2. Produce a CLAUDE.md file following the LOCKED TEMPLATE below
+3. Include all implementation details from the spec
+4. Validate line references against the codebase (if included)
+5. Include ODRC Updates section at the end
+
+LOCKED CLAUDE.md TEMPLATE — Chat MUST follow this structure:
+\`\`\`
+# CLAUDE.md — {Task Name}
+# cc-spec-id: {spec_id}
+# App: {app_name} (index.html)
+# Base version: {current_version}
+# Target version: {next_version}
+# Depends on: {dependencies}
+
+---
+
+## Before You Begin
+{Scope assessment prompt — ask Code if this should split into phases}
+
+---
+
+## Task Summary
+{What to build, in 2-3 sentences}
+
+---
+
+## What to Build
+{Detailed implementation sections with code examples, organized by phase if applicable}
+
+---
+
+## Existing Infrastructure Reference
+{Table of components, locations, and what they do}
+
+---
+
+## Architecture Rules
+### State Management Rules
+### Data Flow Rules
+
+---
+
+## Conventions
+{Project-specific conventions — slug formats, naming, patterns}
+
+---
+
+## File Structure
+{What files are created/modified}
+
+---
+
+## Post-Task Obligations
+RULE: Before reporting this task as complete:
+1. Commit all code changes
+2. Archive this CLAUDE.md to cc/specs/{spec_id}.md
+3. Generate completion file to .cc/completions/
+4. Commit spec archive and completion file separately
+
+Completion file format:
+{Inline YAML template with all required fields}
+\`\`\`
+
+Generate a markdown document with these sections:
+- Session header (idea name, app, session number)
+- "CLAUDE.md Generation Goal"
+- Idea Summary
+- Current ODRC State
+- Expected Output Format (the locked CLAUDE.md template above + ODRC Updates)`;
+
+                default: // exploration
+                    return `You are generating a session brief for a structured ideation conversation.
 The brief will be uploaded to Claude Chat along with a standardized prompt.
 Generate a markdown document with these sections:
 - Session header (idea name, app, session number, current version)
@@ -3478,6 +3574,7 @@ Generate a markdown document with these sections:
 - Supporting Documents — note what else is in the zip
 
 Frame everything in ODRC terms. The brief should make it easy for Chat to pick up context and produce structured ODRC output at session end.`;
+            }
         },
 
         // Main entry point — generates the session brief markdown
@@ -3485,19 +3582,19 @@ Frame everything in ODRC terms. The brief should make it easy for Chat to pick u
             const ideaContext = this.buildIdeaContext(idea, concepts);
             const appContext = this.buildAppContext(app, globalConcepts);
             const odrcState = ODRCSummaryGenerator.generateScoped(concepts, [idea], null);
-            const phase = idea.phase || computeIdeaPhase(concepts);
+            const sessionType = this.getSessionType(idea, concepts);
 
             try {
                 const brief = await ClaudeAPIService.call({
                     model: 'claude-sonnet-4-20250514',
-                    system: this.getSystemPrompt(phase),
+                    system: this.getSystemPrompt(sessionType),
                     userMessage: this.buildUserMessage(ideaContext, appContext, odrcState),
                     maxTokens: 4096
                 });
                 return brief;
             } catch (e) {
                 console.warn('[CC] IdeationBriefGenerator: AI generation failed, using template fallback:', e.message);
-                return this.buildTemplateBrief(idea, app, concepts, ideaContext, appContext, odrcState, phase);
+                return this.buildTemplateBrief(idea, app, concepts, ideaContext, appContext, odrcState, sessionType);
             }
         },
 
@@ -3578,21 +3675,25 @@ Frame everything in ODRC terms. The brief should make it easy for Chat to pick u
 
         // Template fallback when AI is unavailable
         // v8.61.1: Added phase param for spec-ready framing
-        buildTemplateBrief(idea, app, concepts, ideaContext, appContext, odrcState, phase) {
+        // v8.62.0 B1: Template handles all three session types
+        buildTemplateBrief(idea, app, concepts, ideaContext, appContext, odrcState, sessionType) {
             const sessionNum = ideaContext.sessionCount + 1;
             const slug = ideaContext.slug;
             const appId = app?.id || 'unknown';
-            const effectivePhase = phase || ideaContext.phase;
-            const isSpecReady = effectivePhase === 'spec-ready';
 
-            let brief = isSpecReady
-                ? `# Specification Brief — ${ideaContext.name} (Session ${sessionNum})\n`
-                : `# Session Brief — ${ideaContext.name} (Session ${sessionNum})\n`;
-            brief += `App: ${appContext.name} | Phase: ${effectivePhase} | Generated: ${new Date().toLocaleString()}\n\n`;
+            const titlePrefix = sessionType === 'claude-md' ? 'CLAUDE.md Generation Brief'
+                : sessionType === 'spec' ? 'Specification Brief'
+                : 'Session Brief';
+            let brief = `# ${titlePrefix} — ${ideaContext.name} (Session ${sessionNum})\n`;
+            brief += `App: ${appContext.name} | Phase: ${ideaContext.phase} | Session Type: ${sessionType} | Generated: ${new Date().toLocaleString()}\n\n`;
             brief += `---\n\n`;
-            brief += isSpecReady
-                ? `## Spec Goal\nConsolidate accumulated DECISIONs, RULEs, and CONSTRAINTs into an implementable specification. Resolve any remaining OPENs.\n\n`
-                : `## What are you looking to get out of today's session?\n*(State your goal for this session)*\n\n`;
+            if (sessionType === 'claude-md') {
+                brief += `## CLAUDE.md Generation Goal\nProduce a CLAUDE.md from the existing specification using the locked template structure. Validate all implementation details.\n\n`;
+            } else if (sessionType === 'spec') {
+                brief += `## Spec Goal\nConsolidate accumulated DECISIONs, RULEs, and CONSTRAINTs into an implementable specification. Resolve any remaining OPENs.\n\n`;
+            } else {
+                brief += `## What are you looking to get out of today's session?\n*(State your goal for this session)*\n\n`;
+            }
             brief += `---\n\n`;
             brief += `## Idea Summary\n`;
             brief += `${ideaContext.description || 'No description set.'}\n\n`;
@@ -3638,13 +3739,19 @@ Frame everything in ODRC terms. The brief should make it easy for Chat to pick u
             return brief;
         },
 
-        // Standardized handshake prompt — three variable slots only
-        getHandshakePrompt(ideaName, sessionNumber, appName) {
+        // v8.62.0 B1: Session-type-aware handshake prompt
+        getHandshakePrompt(ideaName, sessionNumber, appName, sessionType) {
+            const typeLabel = sessionType === 'spec' ? 'Specification'
+                : sessionType === 'claude-md' ? 'CLAUDE.md Generation'
+                : 'Exploration';
+
             return `Please review the attached session brief and supporting documents for ${ideaName} (Session ${sessionNumber}, App: ${appName}).
+
+This is a ${typeLabel} session.
 
 Confirm you've reviewed the materials, then ask me what I want to accomplish in this session.
 
-Frame all exploration using the ODRC model (OPENs, Decisions, Rules, Constraints). At the end of the session, produce a structured ODRC Updates section using the format defined in the brief.`;
+Frame all work using the ODRC model (OPENs, Decisions, Rules, Constraints). At the end of the session, produce a structured ODRC Updates section using the format defined in the brief.`;
         }
     };
 
@@ -7475,21 +7582,40 @@ Frame all exploration using the ODRC model (OPENs, Decisions, Rules, Constraints
                                             version = extractVersionFromHTML(content);
                                         }
 
-                                        // Phase 3: Detect ODRC content in zip entries
-                                        if (isText && detectODRCContent(content)) {
-                                            console.log('[CC] ODRC content detected in zip entry:', file.relativePath);
-                                            const metadata = extractODRCMetadata(content);
-                                            const odrcSection = extractODRCSection(content);
-                                            const parsed = ODRCUpdateIngestionService.parse(odrcSection || content);
-                                            if (parsed.length > 0) {
-                                                setPendingOdrcImport({
-                                                    fileName: file.relativePath,
-                                                    fullContent: content,
-                                                    odrcSection: odrcSection || content,
-                                                    metadata,
-                                                    parsedUpdates: parsed,
-                                                    sourceApp: appId
-                                                });
+                                        // v8.62.0 B4: Three-path inbound artifact detection in zip entries
+                                        if (isText) {
+                                            const artifactType = detectInboundArtifactType(content);
+                                            const hasOdrcSection = extractODRCSection(content);
+
+                                            if (artifactType === 'odrc') {
+                                                console.log('[CC] ODRC content detected in zip entry:', file.relativePath);
+                                                const metadata = extractODRCMetadata(content);
+                                                const parsed = ODRCUpdateIngestionService.parse(hasOdrcSection || content);
+                                                if (parsed.length > 0) {
+                                                    setPendingOdrcImport({
+                                                        fileName: file.relativePath,
+                                                        fullContent: content,
+                                                        odrcSection: hasOdrcSection || content,
+                                                        metadata,
+                                                        parsedUpdates: parsed,
+                                                        sourceApp: appId
+                                                    });
+                                                }
+                                            } else if ((artifactType === 'spec' || artifactType === 'claude-md') && hasOdrcSection) {
+                                                console.log(`[CC] ${artifactType} artifact with ODRC section in zip entry:`, file.relativePath);
+                                                const metadata = extractODRCMetadata(content);
+                                                const parsed = ODRCUpdateIngestionService.parse(hasOdrcSection);
+                                                if (parsed.length > 0) {
+                                                    setPendingOdrcImport({
+                                                        fileName: file.relativePath,
+                                                        fullContent: content,
+                                                        odrcSection: hasOdrcSection,
+                                                        metadata,
+                                                        parsedUpdates: parsed,
+                                                        sourceApp: appId,
+                                                        artifactType
+                                                    });
+                                                }
                                             }
                                         }
 
@@ -7875,22 +8001,58 @@ Frame all exploration using the ODRC model (OPENs, Decisions, Rules, Constraints
                     // Detect CLAUDE.md regardless of upload filename (e.g., Claude-2.md)
                     cleanedName = detectClaudeMd(cleanedName, isText ? content : null);
 
-                    // Phase 3: Detect ODRC content from Chat session output
-                    if (isText && detectODRCContent(content)) {
-                        console.log('[CC] ODRC content detected in single file:', file.name);
-                        const metadata = extractODRCMetadata(content);
-                        const odrcSection = extractODRCSection(content);
-                        const parsed = ODRCUpdateIngestionService.parse(odrcSection || content);
-                        if (parsed.length > 0) {
-                            setPendingOdrcImport({
-                                fileName: cleanedName,
-                                fullContent: content,
-                                odrcSection: odrcSection || content,
-                                metadata,
-                                parsedUpdates: parsed,
-                                sourceApp: suggestedApp
-                            });
-                            // Still stage the file for potential doc push, but ODRC modal takes priority
+                    // v8.62.0 B4: Three-path inbound artifact detection
+                    if (isText) {
+                        const artifactType = detectInboundArtifactType(content);
+                        const hasOdrcSection = extractODRCSection(content);
+
+                        if (artifactType === 'odrc') {
+                            // Pure ODRC file — existing flow
+                            console.log('[CC] ODRC content detected in single file:', file.name);
+                            const metadata = extractODRCMetadata(content);
+                            const odrcSection = hasOdrcSection || content;
+                            const parsed = ODRCUpdateIngestionService.parse(odrcSection);
+                            if (parsed.length > 0) {
+                                setPendingOdrcImport({
+                                    fileName: cleanedName,
+                                    fullContent: content,
+                                    odrcSection,
+                                    metadata,
+                                    parsedUpdates: parsed,
+                                    sourceApp: suggestedApp
+                                });
+                            }
+                        } else if (artifactType === 'spec' || artifactType === 'claude-md') {
+                            // Spec or CLAUDE.md artifact — may also contain ODRC updates
+                            console.log(`[CC] ${artifactType} artifact detected in single file:`, file.name);
+                            const metadata = extractODRCMetadata(content);
+
+                            // If it also has ODRC updates, extract and show checklist
+                            if (hasOdrcSection) {
+                                const parsed = ODRCUpdateIngestionService.parse(hasOdrcSection);
+                                if (parsed.length > 0) {
+                                    setPendingOdrcImport({
+                                        fileName: cleanedName,
+                                        fullContent: content,
+                                        odrcSection: hasOdrcSection,
+                                        metadata,
+                                        parsedUpdates: parsed,
+                                        sourceApp: suggestedApp,
+                                        artifactType // spec or claude-md — tells modal to also push the doc
+                                    });
+                                }
+                            }
+
+                            // Notify about the artifact
+                            if (typeof addNotification === 'function') {
+                                const typeLabel = artifactType === 'claude-md' ? 'CLAUDE.md' : 'Spec document';
+                                addNotification({
+                                    icon: artifactType === 'claude-md' ? '📄' : '📋',
+                                    title: `${typeLabel} detected`,
+                                    message: `${file.name} — will be staged for deploy`,
+                                    action: null
+                                });
+                            }
                         }
                     }
 
@@ -9270,6 +9432,7 @@ Frame all exploration using the ODRC model (OPENs, Decisions, Rules, Constraints
                             updateApp={updateApp}
                             globalConcepts={globalConcepts}
                             globalIdeas={globalIdeas}
+                            addNotification={addNotification}
                         />
                         </>
                     )}
@@ -10321,7 +10484,7 @@ Frame all exploration using the ODRC model (OPENs, Decisions, Rules, Constraints
     // DASHBOARD VIEW
     // =========================================================================
     
-    function DashboardView({ apps, config, stagedFiles, setStagedFiles, github, onFileDrop, onRemove, onDeploy, onBatchDeploy, onPromote, activeDeployments, removeActiveDeployment, refreshing, onUpdateStagedFile, deployingRepos, showConfirm, showAlert, showPrompt, globalIssues, globalWorkItems, globalStreams, globalSessions, globalActivity, deployments, firebaseUid, setModal, linkIssuesToVersion, setView, rollbackSnapshots, onQuickRollback, pendingSessionReturn, setPendingSessionReturn, pendingOdrcImport, setPendingOdrcImport, updateApp, globalConcepts, globalIdeas }) {
+    function DashboardView({ apps, config, stagedFiles, setStagedFiles, github, onFileDrop, onRemove, onDeploy, onBatchDeploy, onPromote, activeDeployments, removeActiveDeployment, refreshing, onUpdateStagedFile, deployingRepos, showConfirm, showAlert, showPrompt, globalIssues, globalWorkItems, globalStreams, globalSessions, globalActivity, deployments, firebaseUid, setModal, linkIssuesToVersion, setView, rollbackSnapshots, onQuickRollback, pendingSessionReturn, setPendingSessionReturn, pendingOdrcImport, setPendingOdrcImport, updateApp, globalConcepts, globalIdeas, addNotification }) {
         const [selectedFileIds, setSelectedFileIds] = React.useState(new Set());
         const [deployTarget, setDeployTarget] = React.useState({ appId: 'command-center', target: 'test' });
         const [isDeploying, setIsDeploying] = React.useState(false);
@@ -18268,7 +18431,8 @@ When complete, note: "Completes ${item.id}" in deploy notes.`;
                 return () => { cancelled = true; };
             }, [idea.id]);
 
-            const handshakePrompt = IdeationBriefGenerator.getHandshakePrompt(idea.name, sessionNum, app?.name || 'Unknown');
+            const sessionType = IdeationBriefGenerator.getSessionType(idea, concepts);
+            const handshakePrompt = IdeationBriefGenerator.getHandshakePrompt(idea.name, sessionNum, app?.name || 'Unknown', sessionType);
 
             const copyPrompt = async () => {
                 try {
@@ -18344,7 +18508,11 @@ When complete, note: "Completes ${item.id}" in deploy notes.`;
                 <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4" onClick={onClose}>
                     <div className="bg-slate-800 rounded-xl border border-slate-700 w-full max-w-3xl max-h-[85vh] flex flex-col" onClick={e => e.stopPropagation()}>
                         <div className="flex items-center justify-between p-4 border-b border-slate-700">
-                            <h2 className="text-lg font-bold">🗣️ Explore in Chat — {idea.name.substring(0, 50)}{idea.name.length > 50 ? '…' : ''} (Session {sessionNum})</h2>
+                            <h2 className="text-lg font-bold">{
+                                sessionType === 'spec' ? '📋 Generate Spec' :
+                                sessionType === 'claude-md' ? '📄 Generate CLAUDE.md' :
+                                '🗣️ Explore in Chat'
+                            } — {idea.name.substring(0, 50)}{idea.name.length > 50 ? '…' : ''} (Session {sessionNum})</h2>
                             <button onClick={onClose} className="text-slate-400 hover:text-white text-xl">✕</button>
                         </div>
                         <div className="flex-1 overflow-y-auto p-4">
@@ -18621,13 +18789,18 @@ When complete, note: "Completes ${item.id}" in deploy notes.`;
                                                         'bg-green-900/50 text-green-300'
                                                     }`}>{phase}</span>
                                                 </button>
-                                                {idea.status === 'active' && (
-                                                    <button onClick={() => setShowExploreModal({ ideaId: idea.id })}
-                                                        className="px-2 py-1.5 rounded text-sm bg-purple-700 hover:bg-purple-600 transition-colors"
-                                                        title="Explore in Chat">
-                                                        🗣️
-                                                    </button>
-                                                )}
+                                                {idea.status === 'active' && (() => {
+                                                    const st = IdeationBriefGenerator.getSessionType(idea, ideaCpts);
+                                                    const icon = st === 'spec' ? '📋' : st === 'claude-md' ? '📄' : '🗣️';
+                                                    const tip = st === 'spec' ? 'Generate Spec' : st === 'claude-md' ? 'Generate CLAUDE.md' : 'Explore in Chat';
+                                                    return (
+                                                        <button onClick={() => setShowExploreModal({ ideaId: idea.id })}
+                                                            className="px-2 py-1.5 rounded text-sm bg-purple-700 hover:bg-purple-600 transition-colors"
+                                                            title={tip}>
+                                                            {icon}
+                                                        </button>
+                                                    );
+                                                })()}
                                             </div>
                                         );
                                     })}
@@ -18699,10 +18872,16 @@ When complete, note: "Completes ${item.id}" in deploy notes.`;
                             <div className="flex gap-2">
                                 <button onClick={() => setShowEditModal({ concept: null, isNew: true, defaultIdeaId: selectedIdea.id })}
                                     className="px-3 py-1.5 rounded text-sm bg-indigo-600 hover:bg-indigo-500 font-medium">+ Add Concept</button>
-                                {selectedIdea.status === 'active' && (
-                                    <button onClick={() => setShowExploreModal({ ideaId: selectedIdea.id })}
-                                        className="px-3 py-1.5 rounded text-sm bg-purple-700 hover:bg-purple-600 font-medium">🗣️ Explore in Chat</button>
-                                )}
+                                {selectedIdea.status === 'active' && (() => {
+                                    const st = IdeationBriefGenerator.getSessionType(selectedIdea, ideaConcepts);
+                                    const label = st === 'spec' ? '📋 Generate Spec'
+                                        : st === 'claude-md' ? '📄 Generate CLAUDE.md in Chat'
+                                        : '🗣️ Explore in Chat';
+                                    return (
+                                        <button onClick={() => setShowExploreModal({ ideaId: selectedIdea.id })}
+                                            className="px-3 py-1.5 rounded text-sm bg-purple-700 hover:bg-purple-600 font-medium">{label}</button>
+                                    );
+                                })()}
                                 {selectedIdea.status === 'active' && !selectedIdea.appId && (
                                     <button onClick={() => graduateIdea(selectedIdea.id)}
                                         className="px-3 py-1.5 rounded text-sm bg-green-700 hover:bg-green-600">🎓 Graduate</button>
