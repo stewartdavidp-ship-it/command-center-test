@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Command Center</title>
-    <meta name="version" content="8.63.4">
+    <meta name="version" content="8.63.5">
     <meta name="gs-app-id" content="command-center">
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -15207,6 +15207,208 @@ When complete, note: "Completes ${item.id}" in deploy notes.`;
     }
 
     // =========================================================================
+    // ExploreInChatModal — extracted from IdeasView (v8.63.4 fix: prevent remount flicker)
+    // Must be top-level so React keeps a stable component reference across parent re-renders
+    // =========================================================================
+    function ExploreInChatModal({ idea, onClose, configuredApps, apps, globalConcepts, showAlert, github }) {
+        const app = idea.appId ? (configuredApps.find(a => a.id === idea.appId) || apps[idea.appId]) : null;
+        const concepts = globalConcepts.filter(c => c.ideaOrigin === idea.id);
+        const sessionNum = (idea.sessionLog?.length || 0) + 1;
+        const slug = idea.slug || IdeaManager.generateSlug(idea.name);
+        const computed = computeIdeaPhase(concepts);
+        const phase = idea.phase || computed;
+
+        const [briefText, setBriefText] = React.useState(null);
+        const [generating, setGenerating] = React.useState(false);
+        const [pushing, setPushing] = React.useState(false);
+        const [error, setError] = React.useState(null);
+        const [includeCodebase, setIncludeCodebase] = React.useState(phase === 'converging' || phase === 'spec-ready');
+
+        const sizeThreshold = 8000;
+        const isLargeBrief = briefText && briefText.length >= sizeThreshold;
+
+        // Auto-generate brief on mount
+        React.useEffect(() => {
+            let cancelled = false;
+            (async () => {
+                setGenerating(true);
+                setError(null);
+                try {
+                    const result = await IdeationBriefGenerator.generate(idea, app, concepts, globalConcepts);
+                    if (!cancelled) setBriefText(result);
+                } catch (e) {
+                    if (!cancelled) setError(e.message);
+                }
+                if (!cancelled) setGenerating(false);
+            })();
+            return () => { cancelled = true; };
+        }, [idea.id]);
+
+        const sessionType = IdeationBriefGenerator.getSessionType(idea, concepts);
+        const handshakePrompt = IdeationBriefGenerator.getHandshakePrompt(idea.name, sessionNum, app?.name || 'Unknown', sessionType);
+
+        const copyPrompt = async () => {
+            try {
+                await navigator.clipboard.writeText(handshakePrompt);
+                await showAlert('Handshake prompt copied to clipboard', '📋 Copied');
+            } catch (e) { await showAlert('Copy failed: ' + e.message, '❌ Error'); }
+        };
+
+        const copyBrief = async () => {
+            if (!briefText) return;
+            try {
+                await navigator.clipboard.writeText(briefText);
+                await showAlert('Session brief copied to clipboard', '📋 Copied');
+            } catch (e) { await showAlert('Copy failed: ' + e.message, '❌ Error'); }
+        };
+
+        const downloadZip = async () => {
+            if (!briefText) return;
+            try {
+                const zip = new JSZip();
+                const briefFilename = `CC-Session-Brief-${idea.name.replace(/[^a-zA-Z0-9]/g, '-')}-S${String(sessionNum).padStart(3, '0')}.md`;
+                zip.file(briefFilename, briefText);
+
+                // Include previous session's ODRC output if exists
+                if (idea.sessionLog?.length > 0 && github) {
+                    const latestSession = idea.sessionLog[idea.sessionLog.length - 1];
+                    if (latestSession.docPath) {
+                        const repo = app?.repos?.test || app?.testRepo || app?.repos?.prod || app?.prodRepo;
+                        if (repo) {
+                            try {
+                                const file = await github.getFile(repo, latestSession.docPath);
+                                if (file?.content) {
+                                    zip.file(`ODRC-Updates-${slug}-latest.md`, atob(file.content));
+                                }
+                            } catch (e) {
+                                console.log('[CC] Could not fetch previous session doc:', e.message);
+                            }
+                        }
+                    }
+                }
+
+                const blob = await zip.generateAsync({ type: 'blob' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `session-brief-${slug}-S${String(sessionNum).padStart(3, '0')}.zip`;
+                a.click();
+                URL.revokeObjectURL(url);
+                console.log('[CC] Downloaded session brief zip for', idea.name);
+            } catch (e) { await showAlert('Download failed: ' + e.message, '❌ Error'); }
+        };
+
+        const pushToRepo = async () => {
+            if (!briefText || !github || !app) return;
+            const repo = app.repos?.test || app.testRepo || app.repos?.prod || app.prodRepo;
+            if (!repo) { await showAlert('No repo configured for this app', '⚠️ No Repo'); return; }
+            setPushing(true);
+            try {
+                const sessionId = generateSessionId(sessionNum);
+                const path = `docs/sessions/${slug}/${sessionId}.md`;
+                const existing = await github.getFile(repo, path).catch(() => null);
+                await github.createOrUpdateFile(repo, path, briefText,
+                    `Add session brief: ${idea.name} ${sessionId}`, existing?.sha || null);
+                await showAlert(`Brief pushed to ${repo}/${path}`, '✅ Pushed');
+                console.log('[CC] Pushed session brief to', repo, path);
+            } catch (e) { await showAlert(`Push failed: ${e.message}`, '❌ Error'); }
+            setPushing(false);
+        };
+
+        const briefSizeKB = briefText ? (briefText.length / 1024).toFixed(1) : '...';
+
+        return (
+            <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4" onClick={onClose}>
+                <div className="bg-slate-800 rounded-xl border border-slate-700 w-full max-w-3xl max-h-[85vh] flex flex-col" onClick={e => e.stopPropagation()}>
+                    <div className="flex items-center justify-between p-4 border-b border-slate-700">
+                        <h2 className="text-lg font-bold">{
+                            sessionType === 'spec' ? '📋 Generate Spec' :
+                            sessionType === 'claude-md' ? '📄 Generate CLAUDE.md' :
+                            '🗣️ Explore in Chat'
+                        } — {idea.name.substring(0, 50)}{idea.name.length > 50 ? '…' : ''} (Session {sessionNum})</h2>
+                        <button onClick={onClose} className="text-slate-400 hover:text-white text-xl">✕</button>
+                    </div>
+                    <div className="flex-1 overflow-y-auto p-4">
+                        {generating && (
+                            <div className="text-center py-8">
+                                <div className="text-3xl mb-3 animate-pulse">🧠</div>
+                                <p className="text-slate-400">Generating session brief...</p>
+                            </div>
+                        )}
+                        {error && (
+                            <div className="bg-red-900/30 border border-red-800 rounded-lg p-3 mb-4 text-sm text-red-300">
+                                ❌ {error}
+                            </div>
+                        )}
+                        {briefText && (
+                            <pre className="text-sm text-slate-300 whitespace-pre-wrap font-mono bg-slate-900 rounded-lg p-4 border border-slate-700 max-h-[40vh] overflow-y-auto">{briefText}</pre>
+                        )}
+
+                        {/* Package contents */}
+                        <div className="mt-4 bg-slate-900/50 rounded-lg p-3 border border-slate-700">
+                            <h3 className="text-sm font-medium text-slate-300 mb-2">Included in package:</h3>
+                            <div className="space-y-1 text-sm">
+                                <div className="flex items-center gap-2">
+                                    <span className="text-green-400">✓</span>
+                                    <span className="text-slate-300">Session brief ({briefSizeKB} KB)</span>
+                                </div>
+                                {idea.sessionLog?.length > 0 ? (
+                                    <div className="flex items-center gap-2">
+                                        <span className="text-green-400">✓</span>
+                                        <span className="text-slate-300">Previous ODRC updates</span>
+                                    </div>
+                                ) : (
+                                    <div className="flex items-center gap-2">
+                                        <span className="text-slate-500">○</span>
+                                        <span className="text-slate-500">No prior sessions</span>
+                                    </div>
+                                )}
+                                <div className="flex items-center gap-2">
+                                    <label className="flex items-center gap-2 cursor-pointer">
+                                        <input type="checkbox" checked={includeCodebase} onChange={e => setIncludeCodebase(e.target.checked)}
+                                            className="rounded bg-slate-700 border-slate-600" />
+                                        <span className={includeCodebase ? 'text-slate-300' : 'text-slate-500'}>
+                                            CC codebase {!includeCodebase && `(not included — phase: ${phase})`}
+                                        </span>
+                                    </label>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Phase info */}
+                        <div className="mt-3 flex items-center gap-2 text-xs text-slate-500">
+                            <span>Phase:</span>
+                            <span className={`px-1.5 py-0.5 rounded ${
+                                phase === 'exploring' ? 'bg-blue-900/50 text-blue-300' :
+                                phase === 'converging' ? 'bg-amber-900/50 text-amber-300' :
+                                'bg-green-900/50 text-green-300'
+                            }`}>{phase}</span>
+                            {idea.phase && idea.phase !== computed && (
+                                <span className="text-amber-400" title={`Computed: ${computed}, Manual override: ${idea.phase}`}>⚠ phase mismatch</span>
+                            )}
+                        </div>
+                    </div>
+                    <div className="flex gap-2 p-4 border-t border-slate-700 justify-end flex-wrap">
+                        <button onClick={copyPrompt}
+                            className="px-4 py-2 rounded text-sm bg-slate-700 hover:bg-slate-600 font-medium">📋 Copy Prompt</button>
+                        {isLargeBrief || idea.sessionLog?.length > 0 ? (
+                            <button onClick={downloadZip} disabled={!briefText}
+                                className="px-4 py-2 rounded text-sm bg-indigo-600 hover:bg-indigo-500 font-medium disabled:opacity-50">📦 Download Zip</button>
+                        ) : (
+                            <button onClick={copyBrief} disabled={!briefText}
+                                className="px-4 py-2 rounded text-sm bg-indigo-600 hover:bg-indigo-500 font-medium disabled:opacity-50">📋 Copy Brief</button>
+                        )}
+                        <button onClick={pushToRepo} disabled={pushing || !briefText}
+                            className="px-4 py-2 rounded text-sm bg-green-700 hover:bg-green-600 font-medium disabled:opacity-50">
+                            {pushing ? '⏳ Pushing...' : '🚀 Push to Repo'}
+                        </button>
+                    </div>
+                </div>
+            </div>
+        );
+    }
+
+    // =========================================================================
     // IDEAS VIEW — ODRC Concept Management + CLAUDE.md Generation + Idea-to-Chat (v8.61.0)
     // =========================================================================
 
@@ -15225,6 +15427,12 @@ When complete, note: "Completes ${item.id}" in deploy notes.`;
         const [appFilter, setAppFilter] = React.useState('all');
 
         const configuredApps = React.useMemo(() => Object.values(apps).filter(a => a.testRepo || a.prodRepo || a.repos), [apps]);
+
+        // Stable reference for ExploreInChatModal idea — prevents remount on parent re-render
+        const exploreIdea = React.useMemo(() => {
+            if (!showExploreModal) return null;
+            return globalIdeas.find(i => i.id === showExploreModal.ideaId) || null;
+        }, [showExploreModal, globalIdeas]);
 
         // === Type/Status styling constants ===
         const TYPE_STYLES = {
@@ -15609,204 +15817,8 @@ When complete, note: "Completes ${item.id}" in deploy notes.`;
         // [v8.63.0] GenerateCLAUDEModal removed — replaced by pipeline CLAUDE.md generation
 
 
-        // === ExploreInChatModal (v8.61.0 — Idea-to-Chat Pipeline) ===
-        const ExploreInChatModal = ({ idea, onClose }) => {
-            const app = idea.appId ? (configuredApps.find(a => a.id === idea.appId) || apps[idea.appId]) : null;
-            const concepts = globalConcepts.filter(c => c.ideaOrigin === idea.id);
-            const sessionNum = (idea.sessionLog?.length || 0) + 1;
-            const slug = idea.slug || IdeaManager.generateSlug(idea.name);
-            const computed = computeIdeaPhase(concepts);
-            const phase = idea.phase || computed;
-
-            const [briefText, setBriefText] = React.useState(null);
-            const [generating, setGenerating] = React.useState(false);
-            const [pushing, setPushing] = React.useState(false);
-            const [error, setError] = React.useState(null);
-            const [includeCodebase, setIncludeCodebase] = React.useState(phase === 'converging' || phase === 'spec-ready');
-
-            const sizeThreshold = 8000;
-            const isLargeBrief = briefText && briefText.length >= sizeThreshold;
-
-            // Auto-generate brief on mount
-            React.useEffect(() => {
-                let cancelled = false;
-                (async () => {
-                    setGenerating(true);
-                    setError(null);
-                    try {
-                        const result = await IdeationBriefGenerator.generate(idea, app, concepts, globalConcepts);
-                        if (!cancelled) setBriefText(result);
-                    } catch (e) {
-                        if (!cancelled) setError(e.message);
-                    }
-                    if (!cancelled) setGenerating(false);
-                })();
-                return () => { cancelled = true; };
-            }, [idea.id]);
-
-            const sessionType = IdeationBriefGenerator.getSessionType(idea, concepts);
-            const handshakePrompt = IdeationBriefGenerator.getHandshakePrompt(idea.name, sessionNum, app?.name || 'Unknown', sessionType);
-
-            const copyPrompt = async () => {
-                try {
-                    await navigator.clipboard.writeText(handshakePrompt);
-                    await showAlert('Handshake prompt copied to clipboard', '📋 Copied');
-                } catch (e) { await showAlert('Copy failed: ' + e.message, '❌ Error'); }
-            };
-
-            const copyBrief = async () => {
-                if (!briefText) return;
-                try {
-                    await navigator.clipboard.writeText(briefText);
-                    await showAlert('Session brief copied to clipboard', '📋 Copied');
-                } catch (e) { await showAlert('Copy failed: ' + e.message, '❌ Error'); }
-            };
-
-            const downloadZip = async () => {
-                if (!briefText) return;
-                try {
-                    const zip = new JSZip();
-                    const briefFilename = `CC-Session-Brief-${idea.name.replace(/[^a-zA-Z0-9]/g, '-')}-S${String(sessionNum).padStart(3, '0')}.md`;
-                    zip.file(briefFilename, briefText);
-
-                    // Include previous session's ODRC output if exists
-                    if (idea.sessionLog?.length > 0 && github) {
-                        const latestSession = idea.sessionLog[idea.sessionLog.length - 1];
-                        if (latestSession.docPath) {
-                            const repo = app?.repos?.test || app?.testRepo || app?.repos?.prod || app?.prodRepo;
-                            if (repo) {
-                                try {
-                                    const file = await github.getFile(repo, latestSession.docPath);
-                                    if (file?.content) {
-                                        zip.file(`ODRC-Updates-${slug}-latest.md`, atob(file.content));
-                                    }
-                                } catch (e) {
-                                    console.log('[CC] Could not fetch previous session doc:', e.message);
-                                }
-                            }
-                        }
-                    }
-
-                    const blob = await zip.generateAsync({ type: 'blob' });
-                    const url = URL.createObjectURL(blob);
-                    const a = document.createElement('a');
-                    a.href = url;
-                    a.download = `session-brief-${slug}-S${String(sessionNum).padStart(3, '0')}.zip`;
-                    a.click();
-                    URL.revokeObjectURL(url);
-                    console.log('[CC] Downloaded session brief zip for', idea.name);
-                } catch (e) { await showAlert('Download failed: ' + e.message, '❌ Error'); }
-            };
-
-            const pushToRepo = async () => {
-                if (!briefText || !github || !app) return;
-                const repo = app.repos?.test || app.testRepo || app.repos?.prod || app.prodRepo;
-                if (!repo) { await showAlert('No repo configured for this app', '⚠️ No Repo'); return; }
-                setPushing(true);
-                try {
-                    const sessionId = generateSessionId(sessionNum);
-                    const path = `docs/sessions/${slug}/${sessionId}.md`;
-                    const existing = await github.getFile(repo, path).catch(() => null);
-                    await github.createOrUpdateFile(repo, path, briefText,
-                        `Add session brief: ${idea.name} ${sessionId}`, existing?.sha || null);
-                    await showAlert(`Brief pushed to ${repo}/${path}`, '✅ Pushed');
-                    console.log('[CC] Pushed session brief to', repo, path);
-                } catch (e) { await showAlert(`Push failed: ${e.message}`, '❌ Error'); }
-                setPushing(false);
-            };
-
-            const briefSizeKB = briefText ? (briefText.length / 1024).toFixed(1) : '...';
-
-            return (
-                <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4" onClick={onClose}>
-                    <div className="bg-slate-800 rounded-xl border border-slate-700 w-full max-w-3xl max-h-[85vh] flex flex-col" onClick={e => e.stopPropagation()}>
-                        <div className="flex items-center justify-between p-4 border-b border-slate-700">
-                            <h2 className="text-lg font-bold">{
-                                sessionType === 'spec' ? '📋 Generate Spec' :
-                                sessionType === 'claude-md' ? '📄 Generate CLAUDE.md' :
-                                '🗣️ Explore in Chat'
-                            } — {idea.name.substring(0, 50)}{idea.name.length > 50 ? '…' : ''} (Session {sessionNum})</h2>
-                            <button onClick={onClose} className="text-slate-400 hover:text-white text-xl">✕</button>
-                        </div>
-                        <div className="flex-1 overflow-y-auto p-4">
-                            {generating && (
-                                <div className="text-center py-8">
-                                    <div className="text-3xl mb-3 animate-pulse">🧠</div>
-                                    <p className="text-slate-400">Generating session brief...</p>
-                                </div>
-                            )}
-                            {error && (
-                                <div className="bg-red-900/30 border border-red-800 rounded-lg p-3 mb-4 text-sm text-red-300">
-                                    ❌ {error}
-                                </div>
-                            )}
-                            {briefText && (
-                                <pre className="text-sm text-slate-300 whitespace-pre-wrap font-mono bg-slate-900 rounded-lg p-4 border border-slate-700 max-h-[40vh] overflow-y-auto">{briefText}</pre>
-                            )}
-
-                            {/* Package contents */}
-                            <div className="mt-4 bg-slate-900/50 rounded-lg p-3 border border-slate-700">
-                                <h3 className="text-sm font-medium text-slate-300 mb-2">Included in package:</h3>
-                                <div className="space-y-1 text-sm">
-                                    <div className="flex items-center gap-2">
-                                        <span className="text-green-400">✓</span>
-                                        <span className="text-slate-300">Session brief ({briefSizeKB} KB)</span>
-                                    </div>
-                                    {idea.sessionLog?.length > 0 ? (
-                                        <div className="flex items-center gap-2">
-                                            <span className="text-green-400">✓</span>
-                                            <span className="text-slate-300">Previous ODRC updates</span>
-                                        </div>
-                                    ) : (
-                                        <div className="flex items-center gap-2">
-                                            <span className="text-slate-500">○</span>
-                                            <span className="text-slate-500">No prior sessions</span>
-                                        </div>
-                                    )}
-                                    <div className="flex items-center gap-2">
-                                        <label className="flex items-center gap-2 cursor-pointer">
-                                            <input type="checkbox" checked={includeCodebase} onChange={e => setIncludeCodebase(e.target.checked)}
-                                                className="rounded bg-slate-700 border-slate-600" />
-                                            <span className={includeCodebase ? 'text-slate-300' : 'text-slate-500'}>
-                                                CC codebase {!includeCodebase && `(not included — phase: ${phase})`}
-                                            </span>
-                                        </label>
-                                    </div>
-                                </div>
-                            </div>
-
-                            {/* Phase info */}
-                            <div className="mt-3 flex items-center gap-2 text-xs text-slate-500">
-                                <span>Phase:</span>
-                                <span className={`px-1.5 py-0.5 rounded ${
-                                    phase === 'exploring' ? 'bg-blue-900/50 text-blue-300' :
-                                    phase === 'converging' ? 'bg-amber-900/50 text-amber-300' :
-                                    'bg-green-900/50 text-green-300'
-                                }`}>{phase}</span>
-                                {idea.phase && idea.phase !== computed && (
-                                    <span className="text-amber-400" title={`Computed: ${computed}, Manual override: ${idea.phase}`}>⚠ phase mismatch</span>
-                                )}
-                            </div>
-                        </div>
-                        <div className="flex gap-2 p-4 border-t border-slate-700 justify-end flex-wrap">
-                            <button onClick={copyPrompt}
-                                className="px-4 py-2 rounded text-sm bg-slate-700 hover:bg-slate-600 font-medium">📋 Copy Prompt</button>
-                            {isLargeBrief || idea.sessionLog?.length > 0 ? (
-                                <button onClick={downloadZip} disabled={!briefText}
-                                    className="px-4 py-2 rounded text-sm bg-indigo-600 hover:bg-indigo-500 font-medium disabled:opacity-50">📦 Download Zip</button>
-                            ) : (
-                                <button onClick={copyBrief} disabled={!briefText}
-                                    className="px-4 py-2 rounded text-sm bg-indigo-600 hover:bg-indigo-500 font-medium disabled:opacity-50">📋 Copy Brief</button>
-                            )}
-                            <button onClick={pushToRepo} disabled={pushing || !briefText}
-                                className="px-4 py-2 rounded text-sm bg-green-700 hover:bg-green-600 font-medium disabled:opacity-50">
-                                {pushing ? '⏳ Pushing...' : '🚀 Push to Repo'}
-                            </button>
-                        </div>
-                    </div>
-                </div>
-            );
-        };
+        // === ExploreInChatModal — extracted to top-level (v8.63.4 fix: prevent remount loop) ===
+        // See ExploreInChatModal definition above IdeasView
 
         // === Auth guard ===
         if (!firebaseUid) {
@@ -16158,10 +16170,11 @@ When complete, note: "Completes ${item.id}" in deploy notes.`;
                     />
                 )}
                 {/* [v8.63.0] GenerateCLAUDEModal removed */}
-                {showExploreModal && (() => {
-                    const exploreIdea = globalIdeas.find(i => i.id === showExploreModal.ideaId);
-                    return exploreIdea ? <ExploreInChatModal idea={exploreIdea} onClose={() => setShowExploreModal(null)} /> : null;
-                })()}
+                {exploreIdea && (
+                    <ExploreInChatModal idea={exploreIdea} onClose={() => setShowExploreModal(null)}
+                        configuredApps={configuredApps} apps={apps} globalConcepts={globalConcepts}
+                        showAlert={showAlert} github={github} />
+                )}
                 {showCreateIdeaModal && (
                     <CreateIdeaModal onClose={() => setShowCreateIdeaModal(false)} />
                 )}
