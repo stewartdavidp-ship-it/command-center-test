@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Command Center</title>
-    <meta name="version" content="8.65.3">
+    <meta name="version" content="8.65.4">
     <meta name="gs-app-id" content="command-center">
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -10784,8 +10784,8 @@ Keep the brief focused on CONTEXT, not INSTRUCTIONS. The skills provide all inst
                     {stagedFiles.length > 0 && <span className="text-xs text-green-400 font-mono ml-auto">📦 {stagedFiles.length} staged</span>}
                 </div>
 
-                {/* Projects/Apps content — hidden by default */}
-                <div style={{ display: projectsCollapsed ? 'none' : 'block' }}>
+                {/* Staged Files + Active Deployments — always visible (outside collapsible) */}
+                {(stagedFiles.length > 0 || (activeDeployments && activeDeployments.length > 0)) && (
                 <div className="space-y-6">
 
                     {/* Staged Files — Multi-App or Single-File view */}
@@ -11836,6 +11836,12 @@ Keep the brief focused on CONTEXT, not INSTRUCTIONS. The skills provide all inst
                         </div>
                     )}
 
+                </div>
+                )}{/* END staged files + active deployments (always visible) */}
+
+                {/* Projects/Apps content — hidden by default */}
+                <div style={{ display: projectsCollapsed ? 'none' : 'block' }}>
+                <div className="space-y-6">
                     {/* v8.53.0: App Cards — THE HERO (full-width, by project) */}
                     {projects.filter(proj => {
                         const projDef = config?.projects?.[proj.id];
