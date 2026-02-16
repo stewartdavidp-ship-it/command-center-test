@@ -6611,7 +6611,8 @@ If vague, suggest stepping back to refine the idea definition before deep explor
                 unclassifiedNudgeThreshold: 5,
                 orphanNudgeThreshold: 5,
                 bundleSizeLimit: 5242880,
-                orphanDetectionDays: 14
+                orphanDetectionDays: 14,
+                orphanDetectionEnabled: false  // v8.70.5: suspended by default — enable in Settings
             };
         },
 
@@ -7761,11 +7762,13 @@ If vague, suggest stepping back to refine the idea definition before deep explor
                             const newJobs = await pollCompletionFiles(github, repo, firebaseUid, globalCompletionJobs, globalOrphanCommits);
                             allNewJobs = allNewJobs.concat(newJobs);
                         } catch (e) { console.warn('[CC] Poll error for', repo, e.message); }
-                        // Phase 3: Also poll for orphan commits
-                        try {
-                            const newOrphans = await pollOrphanCommits(github, repo, firebaseUid, globalCompletionJobs, globalOrphanCommits, completionFileSettings);
-                            allNewOrphans = allNewOrphans.concat(newOrphans);
-                        } catch (e) { console.warn('[CC] Orphan poll error for', repo, e.message); }
+                        // Phase 3: Also poll for orphan commits (v8.70.5: gated by orphanDetectionEnabled setting)
+                        if (completionFileSettings?.orphanDetectionEnabled) {
+                            try {
+                                const newOrphans = await pollOrphanCommits(github, repo, firebaseUid, globalCompletionJobs, globalOrphanCommits, completionFileSettings);
+                                allNewOrphans = allNewOrphans.concat(newOrphans);
+                            } catch (e) { console.warn('[CC] Orphan poll error for', repo, e.message); }
+                        }
                     }
                 }
                 // v8.62.0 A6: Non-blocking notification banners instead of modal dialogs
@@ -10241,9 +10244,9 @@ If vague, suggest stepping back to refine the idea definition before deep explor
                     </div>
                 </header>
 
-                {/* v8.62.0 A6: Non-blocking notification stack */}
+                {/* v8.62.0 A6: Non-blocking notification stack (v8.70.5: moved to bottom-right for visibility) */}
                 {notifications.length > 0 && (
-                    <div className="fixed top-16 right-4 z-40 flex flex-col gap-2" style={{ maxWidth: '320px' }}>
+                    <div className="fixed bottom-4 right-4 z-40 flex flex-col-reverse gap-2" style={{ maxWidth: '360px' }}>
                         {notifications.map((n, idx) => (
                             <div key={n.id} className="bg-slate-800 border border-slate-600 rounded-lg p-3 shadow-lg animate-pulse-once"
                                 style={{ animation: 'fadeIn 0.3s ease-out' }}>
@@ -18814,10 +18817,13 @@ When complete, note: "Completes ${item.id}" in deploy notes.`;
                         checkedRepos.add(repo);
                         const newJobs = await pollCompletionFiles(github, repo, firebaseUid, globalCompletionJobs, globalOrphanCommits);
                         totalNew += newJobs.length;
-                        try {
-                            const newOrphans = await pollOrphanCommits(github, repo, firebaseUid, globalCompletionJobs, globalOrphanCommits || [], completionFileSettings);
-                            totalOrphans += newOrphans.length;
-                        } catch (e) { console.warn('[CC] Orphan poll error:', e.message); }
+                        // v8.70.5: Gate orphan detection on setting
+                        if (completionFileSettings?.orphanDetectionEnabled) {
+                            try {
+                                const newOrphans = await pollOrphanCommits(github, repo, firebaseUid, globalCompletionJobs, globalOrphanCommits || [], completionFileSettings);
+                                totalOrphans += newOrphans.length;
+                            } catch (e) { console.warn('[CC] Orphan poll error:', e.message); }
+                        }
                     }
                 }
                 const parts = [];
@@ -24779,12 +24785,26 @@ The developer uses Claude for iterative development — each session should:
                                 className="bg-slate-700 border border-slate-600 rounded px-3 py-1.5 text-sm w-24" />
                         </div>
                         <div>
-                            <label className="text-sm text-slate-300 block mb-1">Orphan Detection Window (days)</label>
-                            <p className="text-xs text-slate-500 mb-1">Lookback window for orphan commit detection. (Phase 3)</p>
-                            <input type="number" min="1" max="90"
-                                value={completionFileSettings?.orphanDetectionDays || 14}
-                                onChange={e => { if (firebaseUid) CompletionFileSettings.save(firebaseUid, { ...completionFileSettings, orphanDetectionDays: parseInt(e.target.value) || 14 }); }}
-                                className="bg-slate-700 border border-slate-600 rounded px-3 py-1.5 text-sm w-24" />
+                            <div className="flex items-center justify-between mb-1">
+                                <label className="text-sm text-slate-300">Orphan Commit Detection</label>
+                                <label className="flex items-center gap-2 cursor-pointer">
+                                    <span className="text-xs text-slate-400">{completionFileSettings?.orphanDetectionEnabled ? 'Enabled' : 'Suspended'}</span>
+                                    <input type="checkbox"
+                                        checked={!!completionFileSettings?.orphanDetectionEnabled}
+                                        onChange={e => { if (firebaseUid) CompletionFileSettings.save(firebaseUid, { ...completionFileSettings, orphanDetectionEnabled: e.target.checked }); }}
+                                        className="rounded bg-slate-700 border-slate-600" />
+                                </label>
+                            </div>
+                            <p className="text-xs text-slate-500 mb-2">Detect commits without matching completion files. Runs on dashboard/job history navigation.</p>
+                            {completionFileSettings?.orphanDetectionEnabled && (
+                                <div>
+                                    <label className="text-xs text-slate-400 block mb-1">Lookback Window (days)</label>
+                                    <input type="number" min="1" max="90"
+                                        value={completionFileSettings?.orphanDetectionDays || 14}
+                                        onChange={e => { if (firebaseUid) CompletionFileSettings.save(firebaseUid, { ...completionFileSettings, orphanDetectionDays: parseInt(e.target.value) || 14 }); }}
+                                        className="bg-slate-700 border border-slate-600 rounded px-3 py-1.5 text-sm w-24" />
+                                </div>
+                            )}
                         </div>
 
                         {/* v8.70.5: One-off ODRC audit for existing completion jobs */}
