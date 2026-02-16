@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Command Center</title>
-    <meta name="version" content="8.70.2">
+    <meta name="version" content="8.70.3">
     <meta name="gs-app-id" content="command-center">
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -7166,8 +7166,28 @@ If vague, suggest stepping back to refine the idea definition before deep explor
                                     </div>
                                 ))}
                             </div>
-                            <div className="mt-5 bg-slate-700/30 rounded-lg p-3 text-xs text-slate-400">
-                                <strong className="text-slate-300">The cycle repeats.</strong> Each session sharpens your thinking. OPENs become DECISIONs, DECISIONs harden into RULEs. When you're ready, CC generates the spec.
+                            <div className="mt-5 mb-4">
+                                <h3 className="text-sm font-bold text-white mb-2">The ODRC Model</h3>
+                                <p className="text-xs text-slate-400 mb-3">Every session produces concepts in four types. Together they capture your evolving thinking:</p>
+                                <div className="space-y-2">
+                                    {[
+                                        { letter: 'O', label: 'OPEN', color: 'text-yellow-400', bg: 'bg-yellow-900/30 border-yellow-700/40', desc: 'A question or uncertainty. "Should we use WebSockets or polling?" Flag these — they need resolution.' },
+                                        { letter: 'D', label: 'DECISION', color: 'text-blue-400', bg: 'bg-blue-900/30 border-blue-700/40', desc: 'A chosen direction for this phase. "We\'ll use polling for the prototype." Can be revisited later.' },
+                                        { letter: 'R', label: 'RULE', color: 'text-green-400', bg: 'bg-green-900/30 border-green-700/40', desc: 'A hardened decision — do not violate. "All API calls go through the gateway." Stable across phases.' },
+                                        { letter: 'C', label: 'CONSTRAINT', color: 'text-red-400', bg: 'bg-red-900/30 border-red-700/40', desc: 'An external reality you can\'t change. "The app must run in a browser." Work within these.' },
+                                    ].map(item => (
+                                        <div key={item.letter} className={`flex gap-2.5 items-start rounded-lg px-3 py-2 border ${item.bg}`}>
+                                            <span className={`font-bold text-sm ${item.color} flex-shrink-0 w-5`}>{item.letter}</span>
+                                            <div className="flex-1 min-w-0">
+                                                <span className={`text-xs font-semibold ${item.color}`}>{item.label}</span>
+                                                <span className="text-xs text-slate-400"> — {item.desc}</span>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                            <div className="bg-slate-700/30 rounded-lg p-3 text-xs text-slate-400">
+                                <strong className="text-slate-300">The cycle repeats.</strong> OPENs become DECISIONs, DECISIONs harden into RULEs. Each session sharpens your thinking until CC detects you're ready to generate a spec.
                             </div>
                             <div className="flex items-center justify-between mt-6">
                                 <button onClick={() => setStep(4)} className="px-4 py-2 rounded-lg text-slate-400 hover:text-white transition-colors">
