@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Command Center</title>
-    <meta name="version" content="8.70.3">
+    <meta name="version" content="8.70.4">
     <meta name="gs-app-id" content="command-center">
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -301,21 +301,48 @@
             this.tokenExpiry = null;
         }
         
-        // ---- RTDB Rules API ----
-        
-        // Get current RTDB security rules
-        // Quick test — tries to read RTDB rules to verify admin access
+        // ---- RTDB Rules API (v8.70.4) ----
+
+        // Quick test — tries to get a token to verify admin access
         async testConnection() {
             const results = { token: false, errors: [] };
-            
             try {
                 await this.getAccessToken();
                 results.token = true;
             } catch (e) {
                 results.errors.push(`Token: ${e.message}`);
             }
-            
             return results;
+        }
+
+        // Get current RTDB security rules
+        async getRules() {
+            const token = await this.getAccessToken();
+            const dbUrl = 'https://word-boxing-default-rtdb.firebaseio.com';
+            const res = await fetch(`${dbUrl}/.settings/rules.json?access_token=${token}`);
+            if (!res.ok) {
+                const err = await res.text();
+                throw new Error(`Failed to read rules: ${res.status} ${err}`);
+            }
+            return await res.json();
+        }
+
+        // Deploy RTDB security rules
+        async deployRules(rulesJson) {
+            const token = await this.getAccessToken();
+            const dbUrl = 'https://word-boxing-default-rtdb.firebaseio.com';
+            const body = typeof rulesJson === 'string' ? rulesJson : JSON.stringify(rulesJson);
+            const res = await fetch(`${dbUrl}/.settings/rules.json?access_token=${token}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body
+            });
+            if (!res.ok) {
+                const err = await res.text();
+                throw new Error(`Failed to deploy rules: ${res.status} ${err}`);
+            }
+            console.log('[FirebaseAdmin] ✅ RTDB rules deployed successfully');
+            return true;
         }
     }
     
@@ -24800,16 +24827,51 @@ The developer uses Claude for iterative development — each session should:
                                 </div>
                                 
                                 {/* Security rules template */}
-                                <details className="text-xs">
-                                    <summary className="text-slate-500 cursor-pointer hover:text-slate-400">
-                                        🔒 Firebase Security Rules Template
-                                    </summary>
-                                    <div className="mt-2 bg-slate-900 rounded p-3 font-mono text-slate-400 overflow-x-auto whitespace-pre text-[11px]">
-                                        {TeamService.generateRulesTemplate(firebaseUid)}
-                                    </div>
-                                    <button onClick={() => navigator.clipboard.writeText(TeamService.generateRulesTemplate(firebaseUid))}
-                                        className="mt-1 text-indigo-400 hover:text-indigo-300 text-xs">📋 Copy Rules</button>
-                                </details>
+                                {(() => {
+                                    const [rulesDeploying, setRulesDeploying] = React.useState(false);
+                                    const [rulesResult, setRulesResult] = React.useState(null); // { ok, msg }
+                                    const handleDeployRules = async () => {
+                                        setRulesDeploying(true);
+                                        setRulesResult(null);
+                                        try {
+                                            const rulesJson = TeamService.generateRulesTemplate(firebaseUid);
+                                            await firebaseAdmin.deployRules(rulesJson);
+                                            setRulesResult({ ok: true, msg: 'Rules deployed successfully!' });
+                                        } catch (e) {
+                                            setRulesResult({ ok: false, msg: e.message });
+                                        } finally {
+                                            setRulesDeploying(false);
+                                        }
+                                    };
+                                    return (
+                                        <details className="text-xs">
+                                            <summary className="text-slate-500 cursor-pointer hover:text-slate-400">
+                                                🔒 Firebase Security Rules
+                                            </summary>
+                                            <div className="mt-2 bg-slate-900 rounded p-3 font-mono text-slate-400 overflow-x-auto whitespace-pre text-[11px]">
+                                                {TeamService.generateRulesTemplate(firebaseUid)}
+                                            </div>
+                                            <div className="flex items-center gap-2 mt-2">
+                                                <button onClick={() => navigator.clipboard.writeText(TeamService.generateRulesTemplate(firebaseUid))}
+                                                    className="text-indigo-400 hover:text-indigo-300 text-xs">📋 Copy Rules</button>
+                                                <button onClick={handleDeployRules} disabled={rulesDeploying || !firebaseAdmin.serviceAccount}
+                                                    className="text-green-400 hover:text-green-300 text-xs disabled:opacity-50 disabled:cursor-not-allowed">
+                                                    {rulesDeploying ? '⏳ Deploying...' : '🚀 Deploy to Firebase'}
+                                                </button>
+                                            </div>
+                                            {rulesResult && (
+                                                <div className={`mt-2 text-xs px-2 py-1 rounded ${rulesResult.ok ? 'bg-green-900/30 text-green-300' : 'bg-red-900/30 text-red-300'}`}>
+                                                    {rulesResult.ok ? '✅' : '❌'} {rulesResult.msg}
+                                                </div>
+                                            )}
+                                            {!firebaseAdmin.serviceAccount && (
+                                                <div className="mt-1 text-xs text-yellow-400/70">
+                                                    ⚠️ Add a Firebase Service Account key above to enable auto-deploy
+                                                </div>
+                                            )}
+                                        </details>
+                                    );
+                                })()}
                             </div>
                         );
                     })()}
