@@ -2924,6 +2924,39 @@
             return updates;
         },
 
+        // v8.70.5: Convert structured job.odrc object → ingestion-compatible text lines
+        // Bridges the gap between completion file YAML format and the parse() text format
+        odrcToIngestionText(odrc) {
+            if (!odrc) return '';
+            const lines = ['## ODRC Updates'];
+            if (odrc.resolved_opens?.length > 0) {
+                odrc.resolved_opens.forEach(text => {
+                    lines.push(`- RESOLVE OPEN: "${text}"`);
+                });
+            }
+            if (odrc.applied_decisions?.length > 0) {
+                odrc.applied_decisions.forEach(text => {
+                    lines.push(`- NEW DECISION: "${text}"`);
+                });
+            }
+            if (odrc.new_rules?.length > 0) {
+                odrc.new_rules.forEach(text => {
+                    lines.push(`- NEW RULE: "${text}"`);
+                });
+            }
+            if (odrc.new_constraints?.length > 0) {
+                odrc.new_constraints.forEach(text => {
+                    lines.push(`- NEW CONSTRAINT: "${text}"`);
+                });
+            }
+            if (odrc.new_opens?.length > 0) {
+                odrc.new_opens.forEach(text => {
+                    lines.push(`- NEW OPEN: "${text}"`);
+                });
+            }
+            return lines.join('\n');
+        },
+
         // Execute confirmed updates against Firebase
         async execute(uid, updates, globalIdeas) {
             const results = [];
@@ -18895,8 +18928,18 @@ When complete, note: "Completes ${item.id}" in deploy notes.`;
         };
 
         // Phase 3: ODRC Update Import
+        // v8.70.5: Pre-fill from job.odrc and auto-parse if structured data exists
         const openOdrcModal = (jobId) => {
-            setOdrcModal({ jobId, inputText: '', parsedUpdates: [], confirmedIndexes: new Set(), results: null, phase: 'input' });
+            const job = globalCompletionJobs.find(j => j.id === jobId);
+            const prefilledText = job?.odrc ? ODRCUpdateIngestionService.odrcToIngestionText(job.odrc) : '';
+            if (prefilledText) {
+                // Auto-parse: skip the manual input phase and go straight to review
+                const updates = ODRCUpdateIngestionService.parse(prefilledText);
+                const allIndexes = new Set(updates.map((_, i) => i));
+                setOdrcModal({ jobId, inputText: prefilledText, parsedUpdates: updates, confirmedIndexes: allIndexes, results: null, phase: updates.length > 0 ? 'review' : 'input' });
+            } else {
+                setOdrcModal({ jobId, inputText: '', parsedUpdates: [], confirmedIndexes: new Set(), results: null, phase: 'input' });
+            }
         };
         const parseOdrcInput = () => {
             if (!odrcModal) return;
@@ -19169,7 +19212,8 @@ When complete, note: "Completes ${item.id}" in deploy notes.`;
                                                         ✅ Mark as Checked
                                                     </button>
                                                 )}
-                                                {(job.state === 'reviewed' || job.state === 'checked') && (
+                                                {/* v8.70.5: Show ODRC import for any job that has odrc data, or for reviewed/checked jobs */}
+                                                {(job.odrc || job.state === 'reviewed' || job.state === 'checked') && !job.classified && (
                                                     <button onClick={(e) => { e.stopPropagation(); openOdrcModal(job.id); }}
                                                         className="px-3 py-1 rounded text-xs bg-purple-700 hover:bg-purple-600">
                                                         📥 Import ODRC Updates
@@ -19245,7 +19289,13 @@ When complete, note: "Completes ${item.id}" in deploy notes.`;
                                             {/* ODRC references */}
                                             {job.odrc && (
                                                 <div>
-                                                    <h4 className="text-xs font-bold text-slate-400 mb-1">ODRC References</h4>
+                                                    <h4 className="text-xs font-bold text-slate-400 mb-1">
+                                                        ODRC References
+                                                        {job.classified
+                                                            ? <span className="ml-2 text-green-400 font-normal">✅ Imported</span>
+                                                            : <span className="ml-2 text-amber-400 font-normal">⏳ Pending Import</span>
+                                                        }
+                                                    </h4>
                                                     {job.odrc.resolved_opens?.length > 0 && (
                                                         <div className="mb-2">
                                                             <span className="text-xs text-green-400">Resolved OPENs:</span>
