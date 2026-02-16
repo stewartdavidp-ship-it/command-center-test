@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Command Center</title>
-    <meta name="version" content="8.69.8">
+    <meta name="version" content="8.70.0">
     <meta name="gs-app-id" content="command-center">
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -121,7 +121,7 @@
         // Load service account JSON from localStorage
         loadServiceAccount() {
             try {
-                const stored = localStorage.getItem('cc_firebase_sa');
+                const stored = SecretManager.get('firebase_sa') || localStorage.getItem('cc_firebase_sa');
                 if (stored) {
                     this.serviceAccount = JSON.parse(stored);
                     console.log('Firebase SA loaded:', this.serviceAccount.client_email);
@@ -150,8 +150,7 @@
                     throw new Error('Invalid private key format');
                 }
                 this.serviceAccount = sa;
-                localStorage.setItem('cc_firebase_sa', JSON.stringify(sa));
-                localStorage.setItem('gs_firebase_sa', JSON.stringify(sa));
+                SecretManager.set('firebase_sa', JSON.stringify(sa));
                 this.cachedToken = null;
                 this.tokenExpiry = null;
                 console.log('Firebase SA saved:', sa.client_email);
@@ -167,8 +166,7 @@
             this.serviceAccount = null;
             this.cachedToken = null;
             this.tokenExpiry = null;
-            localStorage.removeItem('cc_firebase_sa');
-            localStorage.removeItem('gs_firebase_sa');
+            SecretManager.remove('firebase_sa');
             console.log('Firebase SA cleared');
         }
         
@@ -339,11 +337,57 @@
     const FirebaseConfigSync = {
         BASE_PATH: 'command-center',
         db: null,
+        uid: null, // v8.70.0: Firebase UID for per-user data isolation
         initialized: false,
         syncStatus: 'offline', // 'offline' | 'syncing' | 'synced' | 'error'
         statusListeners: new Set(),
         _recoveryTimer: null, // v8.61.1: Self-healing timer for error recovery
-        
+
+        // v8.70.0: Set active user UID — all refs scoped to command-center/{uid}/{dataKey}
+        setUid(uid) {
+            this.uid = uid;
+            if (uid) console.log(`[ConfigSync] UID set: ${uid.slice(0, 8)}...`);
+            else console.log('[ConfigSync] UID cleared');
+        },
+
+        // v8.70.0: Build a scoped ref — returns null if no UID (guards all operations)
+        _ref(dataKey) {
+            if (!this.db || !this.uid) {
+                if (this.db && !this.uid) console.warn('[ConfigSync] No UID set, skipping ref for', dataKey);
+                return null;
+            }
+            return this.db.ref(`${this.BASE_PATH}/${this.uid}/${dataKey}`);
+        },
+
+        // v8.70.0: One-time migration from global paths to UID-scoped paths
+        async migrateFromGlobal() {
+            if (!this.db || !this.uid) return false;
+            try {
+                const uidRef = this.db.ref(`${this.BASE_PATH}/${this.uid}/config`);
+                const snap = await uidRef.once('value');
+                if (snap.exists()) return false; // Already migrated
+
+                const legacyRef = this.db.ref(`${this.BASE_PATH}/config`);
+                const legacySnap = await legacyRef.once('value');
+                if (!legacySnap.exists()) return false; // No legacy data to migrate
+
+                // Copy all data keys from global to UID-scoped
+                for (const dataKey of Object.keys(this.DATA_KEYS)) {
+                    const src = this.db.ref(`${this.BASE_PATH}/${dataKey}`);
+                    const srcSnap = await src.once('value');
+                    if (srcSnap.exists()) {
+                        const destRef = this._ref(dataKey);
+                        if (destRef) await destRef.set(srcSnap.val());
+                    }
+                }
+                console.log('[ConfigSync] ✅ Migrated legacy global data to UID-scoped path');
+                return true;
+            } catch (e) {
+                console.error('[ConfigSync] Migration failed:', e);
+                return false;
+            }
+        },
+
         // Data key → localStorage key mapping
         DATA_KEYS: {
             'config': 'commandCenterConfig',
@@ -379,7 +423,9 @@
                     if (this.syncStatus !== 'error') return; // Already recovered
                     try {
                         // Lightweight connectivity check — just read a single key
-                        await this.db.ref(`${this.BASE_PATH}/config/_updatedAt`).once('value');
+                        const checkRef = this._ref('config');
+                        if (!checkRef) return;
+                        await checkRef.child('_updatedAt').once('value');
                         // Connection works — clear the error
                         console.log('[ConfigSync] Recovery check passed, clearing error status');
                         this.syncStatus = 'synced';
@@ -406,11 +452,13 @@
         
         async push(dataKey, data) {
             if (!this.initialized || !this.db) return;
+            const ref = this._ref(dataKey);
+            if (!ref) return;
             try {
                 const payload = JSON.parse(JSON.stringify(data)); // Deep clone to strip undefined
                 payload._updatedAt = Date.now();
                 payload._updatedBy = 'local';
-                await this.db.ref(`${this.BASE_PATH}/${dataKey}`).set(payload);
+                await ref.set(payload);
                 this._setStatus('synced');
                 console.log(`[ConfigSync] Pushed ${dataKey} to Firebase`);
             } catch (err) {
@@ -474,8 +522,10 @@
         
         async pull(dataKey) {
             if (!this.initialized || !this.db) return null;
+            const ref = this._ref(dataKey);
+            if (!ref) return null;
             try {
-                const snap = await this.db.ref(`${this.BASE_PATH}/${dataKey}`).once('value');
+                const snap = await ref.once('value');
                 return snap.val();
             } catch (err) {
                 console.warn(`[ConfigSync] Failed to pull ${dataKey}:`, err.message);
@@ -589,10 +639,10 @@
         // --- Clear all Command Center data from Firebase ---
         
         async clearAll() {
-            if (!this.initialized || !this.db) return false;
+            if (!this.initialized || !this.db || !this.uid) return false;
             this._setStatus('syncing');
             try {
-                await this.db.ref(this.BASE_PATH).remove();
+                await this.db.ref(`${this.BASE_PATH}/${this.uid}`).remove();
                 this._setStatus('synced');
                 console.log('[ConfigSync] Cleared all Firebase data');
                 return true;
@@ -606,9 +656,9 @@
         // --- Get approximate data size in Firebase ---
         
         async getDataSize() {
-            if (!this.initialized || !this.db) return null;
+            if (!this.initialized || !this.db || !this.uid) return null;
             try {
-                const snap = await this.db.ref(this.BASE_PATH).once('value');
+                const snap = await this.db.ref(`${this.BASE_PATH}/${this.uid}`).once('value');
                 const data = snap.val();
                 if (!data) return { totalBytes: 0, keys: {} };
                 const totalStr = JSON.stringify(data);
@@ -906,7 +956,15 @@
         
         // Keys that should never be pruned
         PROTECTED_KEYS: ['cc_token', 'cc_token_expires', 'cc_apps_v6', 'commandCenterConfig', 'cc_firebase_sa', 'cc_firebase_uid', 'cc_collapsedProjects', 'cc_default_engine', 'cc_projectStates', 'cc_domain_config', 'cc_godaddy_config', 'cc_token_registry', 'cc_api_key', 'cc_anthropic_api_key', 'cc_repo_health_last', 'githubRepoAssignments', 'gs_github_token', 'gs_firebase_sa', 'gs_firebase_uid', 'gs_config', 'gs_api_key', 'gs_token_expires'],
-        
+
+        // v8.70.0: Check if key is protected (exact match OR UID-namespaced secret pattern)
+        isProtected(key) {
+            if (this.PROTECTED_KEYS.includes(key)) return true;
+            // Recognize UID-namespaced secret keys: cc_{base}_{uid}
+            const secretPrefixes = ['cc_token_', 'cc_token_expires_', 'cc_anthropic_api_key_', 'cc_firebase_sa_'];
+            return secretPrefixes.some(prefix => key.startsWith(prefix));
+        },
+
         // Get current storage usage in bytes
         getUsage() {
             let total = 0;
@@ -935,7 +993,7 @@
                     size,
                     sizeFormatted: this._formatBytes(size),
                     percent: (size / total * 100).toFixed(1),
-                    protected: this.PROTECTED_KEYS.includes(key)
+                    protected: this.isProtected(key)
                 }))
             };
         },
@@ -1030,7 +1088,7 @@
                 ]);
                 for (let i = localStorage.length - 1; i >= 0; i--) {
                     const key = localStorage.key(i);
-                    if (key?.startsWith('cc_') && !knownKeys.has(key)) {
+                    if (key?.startsWith('cc_') && !knownKeys.has(key) && !this.isProtected(key)) {
                         const size = (key.length + localStorage.getItem(key).length) * 2;
                         localStorage.removeItem(key);
                         freed += size;
@@ -1106,6 +1164,77 @@
 
     // Run storage auto-cleanup on app load
     StorageManager.autoCleanup();
+
+    // =========================================================================
+    // SECRET MANAGER — UID-namespaced secret storage (v8.70.0 Multi-User)
+    // Wraps localStorage with per-user key namespacing: cc_{base}_{uid}
+    // All secrets stay in localStorage (never in Firebase), isolated per user.
+    // =========================================================================
+    const SecretManager = {
+        uid: null,
+        BASE_KEYS: ['token', 'token_expires', 'anthropic_api_key', 'firebase_sa'],
+        // Mirror map: base key → satellite localStorage key (for cross-app communication)
+        MIRROR_MAP: { token: 'gs_github_token', firebase_sa: 'gs_firebase_sa' },
+
+        setUid(uid) {
+            this.uid = uid;
+            if (uid) console.log(`[SecretManager] UID set: ${uid.slice(0, 8)}...`);
+            else console.log('[SecretManager] UID cleared');
+        },
+
+        // Build namespaced key: cc_{base}_{uid}
+        _key(base) { return this.uid ? `cc_${base}_${this.uid}` : null; },
+
+        get(base) {
+            const k = this._key(base);
+            if (!k) return null;
+            try { return localStorage.getItem(k); } catch { return null; }
+        },
+
+        set(base, value) {
+            const k = this._key(base);
+            if (!k) return;
+            try {
+                localStorage.setItem(k, value);
+                // Mirror to gs_ satellite keys for cross-app communication
+                if (this.MIRROR_MAP[base]) localStorage.setItem(this.MIRROR_MAP[base], value);
+            } catch {}
+        },
+
+        has(base) { return !!this.get(base); },
+
+        remove(base) {
+            const k = this._key(base);
+            if (!k) return;
+            try {
+                localStorage.removeItem(k);
+                if (this.MIRROR_MAP[base]) localStorage.removeItem(this.MIRROR_MAP[base]);
+            } catch {}
+        },
+
+        // One-time migration: copy un-namespaced legacy keys to UID-namespaced keys
+        // Deletes legacy keys after migration to prevent second-user leak
+        migrateFromGlobal() {
+            if (!this.uid) return;
+            const LEGACY_MAP = {
+                token: 'cc_token', token_expires: 'cc_token_expires',
+                anthropic_api_key: 'cc_anthropic_api_key', firebase_sa: 'cc_firebase_sa'
+            };
+            let migrated = 0;
+            for (const [base, legacyKey] of Object.entries(LEGACY_MAP)) {
+                const namespaced = this._key(base);
+                if (!localStorage.getItem(namespaced)) {
+                    const val = localStorage.getItem(legacyKey);
+                    if (val) {
+                        localStorage.setItem(namespaced, val);
+                        localStorage.removeItem(legacyKey);
+                        migrated++;
+                    }
+                }
+            }
+            if (migrated > 0) console.log(`[SecretManager] Migrated ${migrated} legacy secret(s) to UID-namespaced keys`);
+        }
+    };
 
     // =========================================================================
     // PHASE 0.2 DATA SERVICES — Orchestrator entity services
@@ -2443,7 +2572,7 @@
 
     const ClaudeAPIService = {
         getApiKey() {
-            try { return localStorage.getItem('cc_anthropic_api_key') || ''; } catch { return ''; }
+            try { return SecretManager.get('anthropic_api_key') || localStorage.getItem('cc_anthropic_api_key') || ''; } catch { return ''; }
         },
         isConfigured() { return !!this.getApiKey(); },
         async call({ model = 'claude-haiku-4-5-20251001', system, userMessage, maxTokens = 4096 }) {
@@ -6655,9 +6784,270 @@ If vague, suggest stepping back to refine the idea definition before deep explor
     }
 
     // =========================================================================
+    // SIGN-IN SCREEN (v8.70.0 Multi-User)
+    // Full-screen sign-in gate — shown when no Firebase user is authenticated.
+    // =========================================================================
+    function SignInScreen() {
+        const [error, setError] = React.useState('');
+        const [loading, setLoading] = React.useState(false);
+        const isFileProtocol = window.location.protocol === 'file:';
+
+        const handleSignIn = async () => {
+            if (isFileProtocol) return;
+            setLoading(true);
+            setError('');
+            try {
+                const provider = new firebase.auth.GoogleAuthProvider();
+                await firebaseAuth.signInWithPopup(provider);
+            } catch (e) {
+                console.error('Sign in error:', e);
+                setError(e.message || 'Sign-in failed. Please try again.');
+            } finally {
+                setLoading(false);
+            }
+        };
+
+        return (
+            <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4">
+                <div className="bg-slate-800 rounded-xl border border-slate-700 p-8 max-w-md w-full text-center">
+                    <div className="mb-6">
+                        <Icons.GameShelfLogo size={48} />
+                    </div>
+                    <h1 className="text-2xl font-bold text-white mb-2">Command Center</h1>
+                    <p className="text-slate-400 mb-8">Sign in with your Google account to access your workspace.</p>
+                    {isFileProtocol && (
+                        <div className="bg-yellow-900/30 border border-yellow-700 rounded-lg p-3 mb-4 text-sm text-yellow-300">
+                            ⚠️ Google Sign-in requires HTTPS. Please deploy via GitHub Pages or use a local server.
+                        </div>
+                    )}
+                    {error && (
+                        <div className="bg-red-900/30 border border-red-700 rounded-lg p-3 mb-4 text-sm text-red-300">
+                            {error}
+                        </div>
+                    )}
+                    <button
+                        onClick={handleSignIn}
+                        disabled={isFileProtocol || loading}
+                        className="w-full flex items-center justify-center gap-3 px-6 py-3 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-medium transition-colors"
+                    >
+                        {loading ? (
+                            <span className="animate-spin">⏳</span>
+                        ) : (
+                            <span>🔐</span>
+                        )}
+                        {loading ? 'Signing in...' : 'Sign in with Google'}
+                    </button>
+                    <p className="text-xs text-slate-500 mt-4">
+                        Your workspace data is stored securely in Firebase. Secrets stay in your browser.
+                    </p>
+                </div>
+            </div>
+        );
+    }
+
+    // =========================================================================
+    // SETUP WIZARD (v8.70.0 Multi-User)
+    // Guided onboarding for new users. Gates main UI until GitHub token is set.
+    // =========================================================================
+    function SetupWizard({ firebaseUser, onComplete }) {
+        const [step, setStep] = React.useState(1);
+        const [token, setToken] = React.useState('');
+        const [tokenExpires, setTokenExpires] = React.useState('');
+        const [anthropicKey, setAnthropicKey] = React.useState('');
+        const [validating, setValidating] = React.useState(false);
+        const [validated, setValidated] = React.useState(null); // null | { login, avatar }
+        const [error, setError] = React.useState('');
+
+        const totalSteps = 3;
+
+        const validateToken = async () => {
+            if (!token.trim()) return;
+            setValidating(true);
+            setError('');
+            setValidated(null);
+            try {
+                const api = new GitHubAPI(token.trim());
+                const repos = await api.listRepos();
+                // Get user info from first repo or user endpoint
+                const userRes = await fetch('https://api.github.com/user', {
+                    headers: { Authorization: `token ${token.trim()}` }
+                });
+                const user = await userRes.json();
+                setValidated({ login: user.login, avatar: user.avatar_url, repos: repos.length });
+            } catch (e) {
+                setError('Invalid token — could not authenticate with GitHub. Please check and try again.');
+            } finally {
+                setValidating(false);
+            }
+        };
+
+        const handleComplete = () => {
+            onComplete(token.trim(), {
+                tokenExpires: tokenExpires || null,
+                anthropicKey: anthropicKey.trim() || null
+            });
+        };
+
+        // Step dots
+        const StepDots = () => (
+            <div className="flex items-center justify-center gap-2 mb-8">
+                {Array.from({ length: totalSteps }, (_, i) => (
+                    <div key={i} className={`w-2.5 h-2.5 rounded-full transition-colors ${
+                        i + 1 === step ? 'bg-indigo-500' : i + 1 < step ? 'bg-indigo-700' : 'bg-slate-600'
+                    }`} />
+                ))}
+            </div>
+        );
+
+        return (
+            <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4">
+                <div className="bg-slate-800 rounded-xl border border-slate-700 p-8 max-w-lg w-full">
+                    <StepDots />
+
+                    {/* Step 1: Welcome */}
+                    {step === 1 && (
+                        <div className="text-center">
+                            {firebaseUser?.photoURL && (
+                                <img src={firebaseUser.photoURL} alt="" className="w-16 h-16 rounded-full mx-auto mb-4 border-2 border-indigo-500" />
+                            )}
+                            <h2 className="text-xl font-bold text-white mb-2">
+                                Welcome{firebaseUser?.displayName ? `, ${firebaseUser.displayName.split(' ')[0]}` : ''}!
+                            </h2>
+                            <p className="text-slate-400 mb-6">
+                                Let's set up your Command Center workspace. This only takes a minute.
+                            </p>
+                            <button
+                                onClick={() => setStep(2)}
+                                className="px-6 py-3 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-medium transition-colors"
+                            >
+                                Get Started →
+                            </button>
+                        </div>
+                    )}
+
+                    {/* Step 2: GitHub Token (Required) */}
+                    {step === 2 && (
+                        <div>
+                            <h2 className="text-lg font-bold text-white mb-1">GitHub Personal Access Token</h2>
+                            <p className="text-sm text-slate-400 mb-4">
+                                Required to manage repos and deploy apps.{' '}
+                                <a href="https://github.com/settings/tokens?type=beta" target="_blank" rel="noopener noreferrer" className="text-indigo-400 hover:text-indigo-300">
+                                    Create a fine-grained token →
+                                </a>
+                            </p>
+                            <p className="text-xs text-slate-500 mb-4">
+                                Recommended scopes: <code className="bg-slate-700 px-1 rounded">repo</code> and <code className="bg-slate-700 px-1 rounded">pages</code> access.
+                                Your token stays in this browser only — never sent to Firebase.
+                            </p>
+                            <div className="space-y-3">
+                                <input
+                                    type="password"
+                                    value={token}
+                                    onChange={e => { setToken(e.target.value); setValidated(null); setError(''); }}
+                                    placeholder="github_pat_..."
+                                    className="w-full px-3 py-2 rounded-lg bg-slate-700 border border-slate-600 text-white placeholder-slate-500 focus:border-indigo-500 focus:outline-none"
+                                />
+                                <div className="flex items-center gap-2">
+                                    <label className="text-xs text-slate-400">Expiration date (optional):</label>
+                                    <input
+                                        type="date"
+                                        value={tokenExpires}
+                                        onChange={e => setTokenExpires(e.target.value)}
+                                        className="px-2 py-1 rounded bg-slate-700 border border-slate-600 text-white text-xs focus:border-indigo-500 focus:outline-none"
+                                    />
+                                </div>
+                                {error && (
+                                    <div className="bg-red-900/30 border border-red-700 rounded-lg p-2 text-sm text-red-300">
+                                        {error}
+                                    </div>
+                                )}
+                                {validated && (
+                                    <div className="bg-green-900/30 border border-green-700 rounded-lg p-3 flex items-center gap-3">
+                                        {validated.avatar && <img src={validated.avatar} alt="" className="w-8 h-8 rounded-full" />}
+                                        <div>
+                                            <div className="text-green-300 font-medium text-sm">✓ Authenticated as {validated.login}</div>
+                                            <div className="text-green-400/70 text-xs">{validated.repos} repositories accessible</div>
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                            <div className="flex items-center justify-between mt-6">
+                                <button onClick={() => setStep(1)} className="px-4 py-2 rounded-lg text-slate-400 hover:text-white transition-colors">
+                                    ← Back
+                                </button>
+                                <div className="flex items-center gap-2">
+                                    {!validated && (
+                                        <button
+                                            onClick={validateToken}
+                                            disabled={!token.trim() || validating}
+                                            className="px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-white font-medium disabled:opacity-50 transition-colors"
+                                        >
+                                            {validating ? '⏳ Validating...' : 'Validate'}
+                                        </button>
+                                    )}
+                                    <button
+                                        onClick={() => setStep(3)}
+                                        disabled={!validated}
+                                        className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-medium disabled:opacity-50 transition-colors"
+                                    >
+                                        Next →
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Step 3: API Keys + Done */}
+                    {step === 3 && (
+                        <div>
+                            <h2 className="text-lg font-bold text-white mb-1">API Keys (Optional)</h2>
+                            <p className="text-sm text-slate-400 mb-4">
+                                Add API keys to enable additional features. You can always add these later in Settings.
+                            </p>
+                            <div className="space-y-4">
+                                <div>
+                                    <label className="block text-sm text-slate-300 mb-1">Anthropic API Key</label>
+                                    <p className="text-xs text-slate-500 mb-2">Enables AI-powered completion file generation and spec review.</p>
+                                    <input
+                                        type="password"
+                                        value={anthropicKey}
+                                        onChange={e => setAnthropicKey(e.target.value)}
+                                        placeholder="sk-ant-..."
+                                        className="w-full px-3 py-2 rounded-lg bg-slate-700 border border-slate-600 text-white placeholder-slate-500 focus:border-indigo-500 focus:outline-none"
+                                    />
+                                </div>
+                            </div>
+                            <div className="mt-6 pt-4 border-t border-slate-700">
+                                <h3 className="text-sm font-medium text-slate-300 mb-2">Setup Summary</h3>
+                                <div className="text-xs text-slate-400 space-y-1 mb-4">
+                                    <div>✓ Signed in as {firebaseUser?.displayName || firebaseUser?.email}</div>
+                                    <div>✓ GitHub: {validated?.login || 'connected'} ({validated?.repos || '?'} repos)</div>
+                                    {anthropicKey && <div>✓ Anthropic API key configured</div>}
+                                    {!anthropicKey && <div className="text-slate-500">○ Anthropic API key — skipped (add later in Settings)</div>}
+                                </div>
+                            </div>
+                            <div className="flex items-center justify-between mt-4">
+                                <button onClick={() => setStep(2)} className="px-4 py-2 rounded-lg text-slate-400 hover:text-white transition-colors">
+                                    ← Back
+                                </button>
+                                <button
+                                    onClick={handleComplete}
+                                    className="px-6 py-3 rounded-lg bg-green-600 hover:bg-green-500 text-white font-bold transition-colors"
+                                >
+                                    🚀 Launch Command Center
+                                </button>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            </div>
+        );
+    }
+
+    // =========================================================================
     // MAIN APP
     // =========================================================================
-    
+
     function App() {
         const [view, setView] = React.useState('dashboard');
         const [viewPayload, setViewPayload] = React.useState(null); // v8.65.0: cross-view deep-link payload
@@ -6677,13 +7067,14 @@ If vague, suggest stepping back to refine the idea definition before deep explor
         const dismissNotification = React.useCallback((id) => {
             setNotifications(prev => prev.filter(n => n.id !== id));
         }, []);
-        const [githubToken, setGithubToken] = React.useState(() => {
-            try { return localStorage.getItem('cc_token') || ''; } catch { return ''; }
-        });
-        
+        // v8.70.0: Token initialized empty, hydrated from SecretManager in onAuthStateChanged
+        const [githubToken, setGithubToken] = React.useState('');
+        // v8.70.0: Setup wizard gating — true when minimum credentials (GitHub token) are configured
+        const [setupComplete, setSetupComplete] = React.useState(false);
+
         // Token expiration tracking (v8.3.3)
         const tokenExpires = React.useMemo(() => {
-            try { return localStorage.getItem('cc_token_expires') || ''; } catch { return ''; }
+            try { return SecretManager.get('token_expires') || localStorage.getItem('cc_token_expires') || ''; } catch { return ''; }
         }, [githubToken]);
         const daysUntilExpiry = tokenExpires ? Math.ceil((new Date(tokenExpires) - new Date()) / (1000 * 60 * 60 * 24)) : null;
         const tokenExpiryWarning = githubToken && daysUntilExpiry !== null && daysUntilExpiry <= 14;
@@ -7030,6 +7421,20 @@ If vague, suggest stepping back to refine the idea definition before deep explor
                 setFirebaseUser(u);
                 if (u) {
                     setFirebaseUid(u.uid);
+                    // v8.70.0: Wire SecretManager + ConfigSync to user UID
+                    SecretManager.setUid(u.uid);
+                    FirebaseConfigSync.setUid(u.uid);
+                    // Migrate legacy un-namespaced secrets (sync, fast)
+                    SecretManager.migrateFromGlobal();
+                    // Migrate legacy global Firebase data (async)
+                    FirebaseConfigSync.migrateFromGlobal().catch(e =>
+                        console.error('[CC] ConfigSync migration failed:', e)
+                    );
+                    // Hydrate githubToken from namespaced storage
+                    const storedToken = SecretManager.get('token');
+                    if (storedToken) setGithubToken(storedToken);
+                    // Check if setup is complete (GitHub token = minimum viable credential)
+                    setSetupComplete(SecretManager.has('token'));
                     // Listen for issues changes via IssueService
                     unsubscribeIssues = IssueService.listen(u.uid, setGlobalIssues);
                     // Listen for work items via WorkItemService (v8.22.0)
@@ -7063,6 +7468,11 @@ If vague, suggest stepping back to refine the idea definition before deep explor
                     unsubscribeOrphans = OrphanDetectionService.listen(u.uid, setGlobalOrphanCommits);
                 } else {
                     setFirebaseUid(null);
+                    // v8.70.0: Clear SecretManager + ConfigSync UIDs (secrets persist in localStorage)
+                    SecretManager.setUid(null);
+                    FirebaseConfigSync.setUid(null);
+                    setSetupComplete(false);
+                    setGithubToken('');
                     setGlobalIssues([]);
                     setGlobalWorkItems([]);
                     setGlobalSessions([]);
@@ -7174,7 +7584,7 @@ If vague, suggest stepping back to refine the idea definition before deep explor
         const github = React.useMemo(() => IS_TEST_MODE && window.MockGitHubAPI ? window.MockGitHubAPI : (githubToken ? new GitHubAPI(githubToken) : null), [githubToken]);
         
         // Persist
-        React.useEffect(() => { try { if (githubToken) { localStorage.setItem('cc_token', githubToken); localStorage.setItem('gs_github_token', githubToken); } } catch {} }, [githubToken]);
+        React.useEffect(() => { try { if (githubToken) { SecretManager.set('token', githubToken); } } catch {} }, [githubToken]);
         React.useEffect(() => { try { StorageManager.safeSet('cc_apps_v6', JSON.stringify(apps)); } catch {} }, [apps]);
         React.useEffect(() => { DeployService.save(deployments); }, [deployments]);
         React.useEffect(() => { SessionLogService.save(sessionLog); }, [sessionLog]);
@@ -7183,7 +7593,8 @@ If vague, suggest stepping back to refine the idea definition before deep explor
         // Load localStorage first (instant), then pull from Firebase and overlay if newer.
         // On first run (Firebase empty), push local data up to seed Firebase.
         React.useEffect(() => {
-            if (!FirebaseConfigSync.initialized || syncInitialized) return;
+            // v8.70.0: Wait for auth to set UID before syncing (data is now per-user)
+            if (!FirebaseConfigSync.initialized || syncInitialized || !firebaseUid) return;
             
             const unsubscribe = FirebaseConfigSync.onStatusChange(setSyncStatus);
             
@@ -7325,7 +7736,7 @@ If vague, suggest stepping back to refine the idea definition before deep explor
             doSync();
             
             return () => unsubscribe();
-        }, [syncInitialized]);
+        }, [syncInitialized, firebaseUid]);
         
         // v8.18.0: Force sync handler for Settings UI
         const handleForceSync = async (direction) => {
@@ -9398,6 +9809,25 @@ If vague, suggest stepping back to refine the idea definition before deep explor
             setDeployments(prev => prev.map(d => d.id === deployment.id ? deployment : d));
         };
         
+        // v8.70.0: Three-state render gate for multi-user mode
+        // State 1: Not signed in → show sign-in screen
+        if (!firebaseUid) {
+            return React.createElement(SignInScreen, null);
+        }
+        // State 2: Signed in but no GitHub token → show setup wizard
+        if (!setupComplete) {
+            return React.createElement(SetupWizard, {
+                firebaseUser: firebaseUser,
+                onComplete: (token, extras) => {
+                    SecretManager.set('token', token);
+                    if (extras.tokenExpires) SecretManager.set('token_expires', extras.tokenExpires);
+                    if (extras.anthropicKey) SecretManager.set('anthropic_api_key', extras.anthropicKey);
+                    setGithubToken(token);
+                    setSetupComplete(true);
+                }
+            });
+        }
+        // State 3: Fully authenticated + configured → main UI
         return (
             <div className="min-h-screen" data-testid="app-loaded">
                 <header className="bg-slate-800 border-b border-slate-700 sticky top-0 z-50">
@@ -23984,7 +24414,7 @@ The developer uses Claude for iterative development — each session should:
         
         // Token expiration tracking (v8.3.3)
         const [tokenExpires, setTokenExpires] = React.useState(() => {
-            try { return localStorage.getItem('cc_token_expires') || ''; } catch { return ''; }
+            try { return SecretManager.get('token_expires') || localStorage.getItem('cc_token_expires') || ''; } catch { return ''; }
         });
         
         const saveTokenWithExpiry = (newToken, days = 90) => {
@@ -23994,7 +24424,7 @@ The developer uses Claude for iterative development — each session should:
                 expires.setDate(expires.getDate() + days);
                 const expiresStr = expires.toISOString();
                 setTokenExpires(expiresStr);
-                try { localStorage.setItem('cc_token_expires', expiresStr); localStorage.setItem('gs_token_expires', expiresStr); } catch {}
+                try { SecretManager.set('token_expires', expiresStr); } catch {}
             }
         };
         
@@ -24030,7 +24460,7 @@ The developer uses Claude for iterative development — each session should:
                 {/* Anthropic API Key (v8.60.1 — Bug Fix) */}
                 {(() => {
                     const [apiKeyVal, setApiKeyVal] = React.useState(() => {
-                        try { return localStorage.getItem('cc_anthropic_api_key') || ''; } catch { return ''; }
+                        try { return SecretManager.get('anthropic_api_key') || localStorage.getItem('cc_anthropic_api_key') || ''; } catch { return ''; }
                     });
                     const [showKey, setShowKey] = React.useState(false);
                     const [saved, setSaved] = React.useState(false);
@@ -24048,13 +24478,13 @@ The developer uses Claude for iterative development — each session should:
                                     className="px-2 py-1.5 rounded text-xs bg-slate-700 hover:bg-slate-600">
                                     {showKey ? '🙈 Hide' : '👁 Show'}
                                 </button>
-                                <button onClick={() => { localStorage.setItem('cc_anthropic_api_key', apiKeyVal); setSaved(true); }}
+                                <button onClick={() => { SecretManager.set('anthropic_api_key', apiKeyVal); setSaved(true); }}
                                     disabled={saved}
                                     className="px-3 py-1.5 rounded text-xs bg-indigo-600 hover:bg-indigo-500 font-medium disabled:opacity-50">
                                     {saved ? '✓ Saved' : 'Save'}
                                 </button>
                                 {apiKeyVal && (
-                                    <button onClick={() => { localStorage.removeItem('cc_anthropic_api_key'); setApiKeyVal(''); setSaved(false); }}
+                                    <button onClick={() => { SecretManager.remove('anthropic_api_key'); setApiKeyVal(''); setSaved(false); }}
                                         className="px-2 py-1.5 rounded text-xs bg-red-900/50 hover:bg-red-800 text-red-300">
                                         Clear
                                     </button>
