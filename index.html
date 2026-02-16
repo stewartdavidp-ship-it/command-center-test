@@ -6550,6 +6550,18 @@ If vague, suggest stepping back to refine the idea definition before deep explor
         _ref(uid) { return firebaseDb.ref(`command-center/${uid}/completionJobs`); },
 
         async create(uid, jobData) {
+            // v8.70.7: Duplicate guard — skip if a job with same repo+fileName already exists
+            const existing = await this._ref(uid)
+                .orderByChild('fileName').equalTo(jobData.fileName || '')
+                .once('value');
+            if (existing.exists()) {
+                const matches = Object.values(existing.val());
+                if (matches.some(j => j.repoFullName === (jobData.repoFullName || ''))) {
+                    console.log('[CC] CompletionFileService.create: SKIPPED duplicate', jobData.fileName);
+                    return matches.find(j => j.repoFullName === (jobData.repoFullName || ''));
+                }
+            }
+
             const ref = this._ref(uid).push();
             const record = {
                 id: ref.key,
@@ -7641,6 +7653,7 @@ If vague, suggest stepping back to refine the idea definition before deep explor
         const [globalConcepts, setGlobalConcepts] = React.useState([]); // Ideation: ODRC concepts
         const [globalIdeas, setGlobalIdeas] = React.useState([]); // Ideation: Ideas
         const [globalCompletionJobs, setGlobalCompletionJobs] = React.useState([]); // Ingestion: Completion jobs
+        const completionJobsLoadedRef = React.useRef(false); // v8.70.7: Gate polling until Firebase listener fires
         const [globalOrphanCommits, setGlobalOrphanCommits] = React.useState([]); // Phase 3: Orphan commits
         const [completionFileSettings, setCompletionFileSettings] = React.useState(CompletionFileSettings.getDefaults());
         const [firebaseUid, setFirebaseUid] = React.useState(null);
@@ -7711,7 +7724,10 @@ If vague, suggest stepping back to refine the idea definition before deep explor
                         console.error('[CC] Idea backfill failed:', e)
                     );
                     // Listen for completion jobs and settings (Ingestion Pipeline)
-                    unsubscribeCompletionJobs = CompletionFileService.listen(u.uid, setGlobalCompletionJobs);
+                    unsubscribeCompletionJobs = CompletionFileService.listen(u.uid, (jobs) => {
+                        setGlobalCompletionJobs(jobs);
+                        completionJobsLoadedRef.current = true;
+                    });
                     unsubscribeCompletionSettings = CompletionFileSettings.listen(u.uid, setCompletionFileSettings);
                     // Listen for orphan commits (Phase 3)
                     unsubscribeOrphans = OrphanDetectionService.listen(u.uid, setGlobalOrphanCommits);
@@ -7734,6 +7750,7 @@ If vague, suggest stepping back to refine the idea definition before deep explor
                     setGlobalConcepts([]);
                     setGlobalIdeas([]);
                     setGlobalCompletionJobs([]);
+                    completionJobsLoadedRef.current = false; // v8.70.7: Reset so next sign-in waits for Firebase
                     setGlobalOrphanCommits([]);
                     setCompletionFileSettings(CompletionFileSettings.getDefaults());
                 }
@@ -7760,10 +7777,12 @@ If vague, suggest stepping back to refine the idea definition before deep explor
         }, []);
 
         // Completion file + orphan commit detection — poll on mount and view changes to dashboard/jobHistory
+        // v8.70.7: Wait for Firebase listener to hydrate existing jobs before polling (prevents duplicate creation)
         const completionPollRef = React.useRef(false);
         React.useEffect(() => {
             if (!firebaseUid || !github || completionPollRef.current) return;
             if (view !== 'dashboard' && view !== 'jobHistory') return;
+            if (!completionJobsLoadedRef.current) return; // Wait for Firebase to hydrate existing jobs
             completionPollRef.current = true;
 
             const runPoll = async () => {
@@ -7812,7 +7831,7 @@ If vague, suggest stepping back to refine the idea definition before deep explor
                 setTimeout(() => { completionPollRef.current = false; }, 60000);
             };
             runPoll();
-        }, [view, firebaseUid, github]);
+        }, [view, firebaseUid, github, globalCompletionJobs.length]);
 
         // Link issues to a deployed version
         // Phase 5.7: Effective workspace UID — if user is a team member, use owner's UID for data access
