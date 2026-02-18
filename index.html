@@ -7789,7 +7789,8 @@
                 </header>
                 
                 <main className="max-w-6xl mx-auto px-4 py-6">
-                    {!githubToken && (
+                    {/* Hide token banner on dashboard when the setup wizard is visible — the wizard handles this step */}
+                    {!githubToken && view !== 'dashboard' && (
                         <div className="mb-6 p-4 bg-amber-900/50 border border-amber-700 rounded-lg">
                             ⚠️ <strong>GitHub Token Required</strong> - Go to Settings
                         </div>
