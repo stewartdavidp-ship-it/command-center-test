@@ -7613,6 +7613,8 @@ The router (\\\`cc-skill-router\\\`) is the single source of truth for skill loa
         const [githubToken, setGithubToken] = React.useState('');
         // v8.70.0: Setup wizard gating — true when minimum credentials (GitHub token) are configured
         const [setupComplete, setSetupComplete] = React.useState(false);
+        // v8.70.8: Test mode — lets existing users preview the setup wizard
+        const [wizardTestMode, setWizardTestMode] = React.useState(false);
 
         // Token expiration tracking (v8.3.3)
         const tokenExpires = React.useMemo(() => {
@@ -10381,6 +10383,21 @@ The router (\\\`cc-skill-router\\\`) is the single source of truth for skill loa
         // State 3: Fully authenticated + configured → main UI
         return (
             <div className="min-h-screen" data-testid="app-loaded">
+                {/* v8.70.8: Wizard test mode overlay for existing users */}
+                {wizardTestMode && (
+                    <div className="fixed inset-0 z-50" style={{zIndex: 9999}}>
+                        <div className="absolute top-3 right-3 z-10">
+                            <button onClick={() => setWizardTestMode(false)}
+                                className="px-3 py-1.5 bg-amber-600 hover:bg-amber-500 rounded-lg text-xs font-medium text-white shadow-lg">
+                                Exit Test Mode ✕
+                            </button>
+                        </div>
+                        {React.createElement(SetupWizard, {
+                            firebaseUser: firebaseUser,
+                            onComplete: () => setWizardTestMode(false)
+                        })}
+                    </div>
+                )}
                 <header className="bg-slate-800 border-b border-slate-700 sticky top-0 z-50">
                     <div className="max-w-6xl mx-auto px-4 py-3">
                         {/* Top row: Logo and main nav */}
@@ -10530,6 +10547,11 @@ The router (\\\`cc-skill-router\\\`) is the single source of truth for skill loa
                                                     👥 {(teamMembers || []).filter(m => m.status === 'active').length + 1}
                                                 </span>
                                             )}
+                                            <button onClick={() => setWizardTestMode(true)}
+                                                className="text-xs text-slate-500 hover:text-indigo-400 transition-colors"
+                                                title="Preview the new-user setup wizard">
+                                                🧙 Wizard
+                                            </button>
                                             <button onClick={async () => { try { await firebaseAuth.signOut(); } catch {} }}
                                                 className="flex items-center gap-1.5 text-green-400 hover:text-green-300 transition-colors"
                                                 title={`Signed in as ${firebaseUser.email}\nClick to sign out`}>
