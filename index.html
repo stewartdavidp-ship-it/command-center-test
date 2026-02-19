@@ -10843,7 +10843,7 @@ The router (\\\`cc-skill-router\\\`) is the single source of truth for skill loa
                     )}
                     
                     {view === 'backlog' && (
-                        <BacklogView apps={apps} showAlert={showAlert} showConfirm={showConfirm} showPrompt={showPrompt} setView={setView} config={config} globalStreams={globalStreams} />
+                        <BacklogView apps={apps} showAlert={showAlert} showConfirm={showConfirm} showPrompt={showPrompt} setView={setView} config={config} globalStreams={globalStreams} globalWorkItems={globalWorkItems} firebaseUser={firebaseUser} />
                     )}
 
                     {view === 'ideas' && (
@@ -16935,10 +16935,12 @@ The router (\\\`cc-skill-router\\\`) is the single source of truth for skill loa
         );
     }
     
-    function BacklogView({ apps, showAlert, showConfirm, showPrompt, setView, config, globalStreams }) {
-        const [workItems, setWorkItems] = React.useState([]);
-        const [firebaseUser, setFirebaseUser] = React.useState(null);
-        const [loading, setLoading] = React.useState(true);
+    // v8.70.8: Accept globalWorkItems + firebaseUser from parent to avoid duplicate Firebase listener.
+    // BacklogView previously created its own WorkItemService.listen — identical to the one in App().
+    // This doubled bandwidth on the backlog collection for every write.
+    function BacklogView({ apps, showAlert, showConfirm, showPrompt, setView, config, globalStreams, globalWorkItems, firebaseUser }) {
+        const workItems = globalWorkItems || [];
+        const loading = !globalWorkItems;
         const [showEditModal, setShowEditModal] = React.useState(null); // null | { item, isNew }
         const [showScopeModal, setShowScopeModal] = React.useState(null); // null | { app }
         const [statusFilter, setStatusFilter] = React.useState('active'); // 'all', 'active', 'idea', 'ready', 'in-progress', 'done', 'deferred'
@@ -16948,25 +16950,8 @@ The router (\\\`cc-skill-router\\\`) is the single source of truth for skill loa
         const [sortBy, setSortBy] = React.useState('priority'); // 'priority', 'status', 'created', 'effort', 'type'
         const [groupBy, setGroupBy] = React.useState('app'); // 'app', 'status', 'type', 'stream', 'none'
         const [selectedItems, setSelectedItems] = React.useState(new Set());
-        
+
         const configuredApps = Object.values(apps).filter(a => a.testRepo || a.prodRepo);
-        
-        // Firebase listener
-        React.useEffect(() => {
-            if (!firebaseAuth) return;
-            let unsub = () => {};
-            const authUnsub = firebaseAuth.onAuthStateChanged((u) => {
-                setFirebaseUser(u);
-                if (u) {
-                    setLoading(true);
-                    unsub = WorkItemService.listen(u.uid, (list) => {
-                        setWorkItems(list);
-                        setLoading(false);
-                    });
-                }
-            });
-            return () => { authUnsub(); unsub(); };
-        }, []);
         
         // Generate next ID
         const getNextId = () => WorkItemService.getNextId(workItems);
