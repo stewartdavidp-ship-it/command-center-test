@@ -3580,13 +3580,16 @@ async function loadUserRole(uid) {
     var userData = userSnap.val();
 
     if (!userData) {
-      // Auto-provision as Guest on first sign-in
+      // Determine initial role:
+      // - Known admin UIDs (ALLOWED_UIDS) bootstrap as admin (migration path)
+      // - Everyone else auto-provisions as guest
+      var initialRole = ALLOWED_UIDS.includes(uid) ? 'admin' : 'guest';
       userData = {
         uid: uid,
         displayName: currentUser.displayName || '',
         email: currentUser.email || '',
         photoURL: currentUser.photoURL || '',
-        role: 'guest',
+        role: initialRole,
         createdAt: firebase.database.ServerValue.TIMESTAMP,
         lastLoginAt: firebase.database.ServerValue.TIMESTAMP
       };
